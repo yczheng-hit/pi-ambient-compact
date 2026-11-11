@@ -18,7 +18,7 @@
 > SoL-Pi is under active development to support pi-v1 and the latest model checkpoints.
 
 > [!IMPORTANT]
-> **This fork ([yczheng-hit/SoL-Pi](https://github.com/yczheng-hit/SoL-Pi)) adds Live Compact**, an experimental, opt-in high-retention context mode, on the `feat/local-context-policy` branch. Upstream [NVlabs/SoL-Pi](https://github.com/NVlabs/SoL-Pi) does not include it. See [Changes in this fork](#changes-in-this-fork) and [Live Compact](#live-compact-experimental).
+> **This fork ([yczheng-hit/SoL-Pi](https://github.com/yczheng-hit/SoL-Pi)) adds Live Compact**, an experimental, opt-in high-retention context mode, on its `main` branch. Upstream [NVlabs/SoL-Pi](https://github.com/NVlabs/SoL-Pi) does not include it. See [Changes in this fork](#changes-in-this-fork) and [Live Compact](#live-compact-experimental).
 
 ## 📰 News
 
@@ -60,7 +60,7 @@ The mechanisms share four rules:
 
 ## Changes in this fork
 
-The upstream base is `2195680` (NVlabs/SoL-Pi `main`). Every change is on the `feat/local-context-policy` branch. With `liveCompact` absent or disabled, every upstream mechanism behaves as before.
+The upstream base is `2195680` (NVlabs/SoL-Pi `main`). Every change is on this fork's `main` branch. With `liveCompact` absent or disabled, every upstream mechanism behaves as before.
 
 **Live Compact (new, experimental, opt-in)**
 
@@ -161,16 +161,14 @@ For the complete schema, see [Configuration](docs/configuration.md). Coding agen
 
 ### Live Compact (experimental)
 
-Live Compact is only in this fork, and its branch has not been pushed yet. Install it from a local checkout of the `feat/local-context-policy` branch:
+Live Compact is only in this fork. Install SoL-Pi from the fork instead of upstream:
 
 ```bash
-git -C /absolute/path/to/SoL-Pi switch feat/local-context-policy
-pi install /absolute/path/to/SoL-Pi            # user-wide
-# or, from the target project:
-pi install /absolute/path/to/SoL-Pi --local --approve
+pi install git:github.com/yczheng-hit/SoL-Pi                     # user-wide
+pi install git:github.com/yczheng-hit/SoL-Pi --local --approve   # current project only
 ```
 
-Once the branch is pushed, `pi install git:github.com/yczheng-hit/SoL-Pi@feat/local-context-policy` installs the same code.
+To pin an exact revision, append `@<commit>` to the source. A local checkout of the fork also works: `pi install /absolute/path/to/SoL-Pi`.
 
 Configure it by copying [`sol-pi.live-compact.example.json`](sol-pi.live-compact.example.json) to the effective `sol-pi.json`. Then validate the file and confirm that Pi registers the mechanism, without sending a prompt:
 

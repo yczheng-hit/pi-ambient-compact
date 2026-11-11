@@ -1,6 +1,6 @@
 # Live Compact 配置规范（设计提案）
 
-状态：schema 已在 `feat/local-context-policy` 分支实现，位于 `src/sol-pi/live-compact-config.mjs`，运行时与 CLI 共用，并有一致性测试。本文是 [总方案](live-compact-plan.md) 的配置参考；修改配置解析器、CLI preflight、配置示例或相关测试前先读本文。
+状态：schema 已在 fork 的 `main` 分支实现，位于 `src/sol-pi/live-compact-config.mjs`，运行时与 CLI 共用，并有一致性测试。本文是 [总方案](live-compact-plan.md) 的配置参考；修改配置解析器、CLI preflight、配置示例或相关测试前先读本文。
 
 各字段当前的生效情况：
 

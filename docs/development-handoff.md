@@ -1,16 +1,16 @@
 # SoL-Pi 开发交接
 
-更新日期：2026-11-11。下一次开发直接在 `/Users/yuchzheng/tools/SoL-Pi` 开始。
+更新日期：2026-11-11。下一次开发在 SoL-Pi fork 的本地检出中开始。
 
 ## 1. 先执行的动作
 
 ```sh
-cd /Users/yuchzheng/tools/SoL-Pi
+cd /path/to/SoL-Pi
 git status --short
 git remote -v
 ```
 
-读完本仓库 `AGENTS.md`；准备安装、构建、配置或测试时，先完整阅读 `agents-install.md`，再按适用流程执行。当前进度：P0 基线与 P1 局部整理已在 `feat/local-context-policy` 分支完成，下一项是 P2（每次请求准入与突发保护）。
+读完本仓库 `AGENTS.md`；准备安装、构建、配置或测试时，先完整阅读 `agents-install.md`，再按适用流程执行。当前进度：P0 基线与 P1 局部整理已在 fork 的 `main` 分支完成，下一项是 P2（每次请求准入与突发保护）。
 
 ## 2. 已确定的目标
 
@@ -22,14 +22,14 @@ git remote -v
 
 本机 Pi 包版本静态检查为 1.5.0，超出仓库目前最高已测试的 1.3.0。尚未执行兼容验证，不应直接视为可用。
 
-- 开发目录：`/Users/yuchzheng/tools/SoL-Pi`。
+- 开发目录：SoL-Pi fork 的本地检出。
 - origin：<https://github.com/yczheng-hit/SoL-Pi>。
 - upstream：<https://github.com/NVlabs/SoL-Pi>。
 - 参考项目：<https://github.com/Tranquillitatis-Lab/dsh-live-compact>。
 - 迁移时分支：`main`。基线提交：`219568034fa54ed121ede80961655e33dfb9d0e3`。
 - 克隆形式：浅克隆、blob 过滤；需要早期历史时再获取。部分 Git 命令可能需要联网补取对象。
 
-迁移前代码工作区干净。当前本地文档包括本文件、`docs/sol-pi-live-compact-research.md`、`docs/live-compact-plan.md` 和 `docs/live-compact-config-plan.md`；尚未 commit 或 push。
+迁移前代码工作区干净。方案文档包括本文件、`docs/sol-pi-live-compact-research.md`、`docs/live-compact-plan.md` 和 `docs/live-compact-config-plan.md`。P0/P1 和这些文档已推送到 fork 的 `main` 分支（origin，yczheng-hit/SoL-Pi）；upstream（NVlabs/SoL-Pi）不包含这些改动。
 
 ## 3. 已完成与未完成
 
@@ -56,7 +56,7 @@ git remote -v
 ## 4. 初版开工顺序（历史记录；现以总方案 P0–P5 为准）
 
 1. 记录 Node 和 PI 版本，按 `agents-install.md` 完成适用的依赖与基线检查；完成标志是记录每项命令结果及实际版本，失败项明确列出。
-2. 从基线建立 `feat/local-context-policy` 开发分支；保留 main 便于跟进上游。
+2. 从基线建立 `feat/local-context-policy` 开发分支（历史记录：完成后已作为 fork 的 `main` 推送；跟进上游时从 upstream/main 合并）。
 3. 扩展现有 ObservationPack 的策略配置，保持旧配置与关闭新策略时的行为；完成标志是配置、校验、示例与对应验证同步。
 4. 加入最近工具轮保护、候选选择和稳定替换决策；完成标志是近期内容受保护，旧占位符不会随连续请求反复展开/折叠。
 5. 验证归档失败、恢复会话、fork 和 native compact 后的召回；完成标志是原文能精确恢复，异常时保留可用原文。

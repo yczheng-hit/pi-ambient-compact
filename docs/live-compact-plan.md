@@ -1,6 +1,6 @@
 # SoL-Pi Live Compact 总方案：质量优先的高保留模式
 
-状态：P0 已完成，P1 已在 `feat/local-context-policy` 分支实现并通过自动化测试（见 §13 实施记录）；P2–P5 尚未实现。未做全局安装，也未在真实 provider 上运行。最终优先级为 **AI 性能 > 用户体验 >> token 开销**；取代早期方案中以经济收益触发压缩的取向。
+状态：P0 已完成，P1 已在 fork 的 `main` 分支实现并通过自动化测试（见 §13 实施记录）；P2–P5 尚未实现。未做全局安装，也未在真实 provider 上运行。最终优先级为 **AI 性能 > 用户体验 >> token 开销**；取代早期方案中以经济收益触发压缩的取向。
 
 ## 1. 目标与结论
 
@@ -60,7 +60,7 @@
 
 ### 2.1 SoL-Pi
 
-- 工作目录：`/Users/yuchzheng/tools/SoL-Pi`。
+- 工作目录：SoL-Pi fork 的本地检出。
 - 当前基线：`219568034fa54ed121ede80961655e33dfb9d0e3`，`main`。
 - 当前功能默认关闭；配置解析器与 CLI preflight 都拒绝未知字段。
 - ObservationPack 当前处理大于 10 KiB 的成功纯文本工具结果，按现有计数完整展示两次，随后使用 1024 字节首尾摘录和 `obs_recall`；不按全局占用率触发。[S1][S2]
@@ -624,7 +624,7 @@ Pi 原生状态栏可能使用上次 usage 或 canonical 投影估计，与本�
 
 ### 本机 Pi 1.5.0 静态证据
 
-- [P1] 安装根目录：`/Users/yuchzheng/.local/share/fnm/node-versions/v24.20.0/installation/lib/node_modules/@earendil-works/pi-coding-agent`。
+- [P1] 安装根目录：`$(npm root -g)/@earendil-works/pi-coding-agent`（本机 fnm 管理的全局 Node 24.20.0 安装）。
 - 读取文件：`package.json`、`docs/compaction.md`、`dist/core/agent-session.js`、`dist/core/compaction/compaction.js`、`dist/core/compaction/compaction.d.ts`、`dist/core/extensions/types.d.ts`、`dist/index.d.ts`、`dist/core/tools/read.js`、`dist/core/tools/truncate.js`。
 - 重点符号：`_compactBeforeNextAssistantResponse`、`_installAgentNextTurnRefresh`、`_checkCompaction`、`getContextUsage`、`shouldCompact`、`completeSummarization`（`cacheRetention: "none"`）、`CompactOptions`、`SessionBeforeCompactResult`。安装目录可能升级；实施时重新核对实际版本，不将这些路径视为永久固定快照。
 

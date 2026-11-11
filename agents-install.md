@@ -51,7 +51,7 @@ npx vitest run tests/all-mechanisms.test.ts
 
 Stop if any command fails. Do not hide a failure with `|| true` or replace `npm ci` with an unlocked install.
 
-For the `live-compact` profile, the checkout must contain Live Compact. Upstream NVlabs/SoL-Pi does not contain it yet; it is developed on the `feat/local-context-policy` branch of the `yczheng-hit/SoL-Pi` fork. Confirm before continuing, and stop if the file is missing:
+For the `live-compact` profile, the checkout must contain Live Compact. Upstream NVlabs/SoL-Pi does not contain it yet; use a checkout of the `yczheng-hit/SoL-Pi` fork (`https://github.com/yczheng-hit/SoL-Pi`, branch `main`). Confirm before continuing, and stop if the file is missing:
 
 ```bash
 test -f src/sol-pi/extensions/live-compact/index.ts
