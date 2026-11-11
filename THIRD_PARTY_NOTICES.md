@@ -8,13 +8,13 @@ The following packages are supplied by the user's Pi installation and retain the
 
 | Package | Development-tested version | License | Source |
 |---|---:|---|---|
-| `@earendil-works/pi-agent-core` | 1.3.0 | MIT | <https://github.com/earendil-works/pi> |
-| `@earendil-works/pi-ai` | 1.3.0 | MIT | <https://github.com/earendil-works/pi> |
-| `@earendil-works/pi-coding-agent` | 1.3.0 | MIT | <https://github.com/earendil-works/pi> |
-| `@earendil-works/pi-tui` | 1.3.0 | MIT | <https://github.com/earendil-works/pi> |
+| `@earendil-works/pi-agent-core` | 1.5.2 | MIT | <https://github.com/earendil-works/pi> |
+| `@earendil-works/pi-ai` | 1.5.2 | MIT | <https://github.com/earendil-works/pi> |
+| `@earendil-works/pi-coding-agent` | 1.5.2 | MIT | <https://github.com/earendil-works/pi> |
+| `@earendil-works/pi-tui` | 1.5.2 | MIT | <https://github.com/earendil-works/pi> |
 | `typebox` | 1.3.27 | MIT | <https://github.com/sinclairzx81/typebox> |
 
-The four Pi packages are also tested at 1.0.4 and at 0.84.2, the supported floor.
+The four Pi packages are also tested at 1.3.0, 1.0.4, and 0.84.2, the supported floor.
 
 ## Development-only dependencies
 

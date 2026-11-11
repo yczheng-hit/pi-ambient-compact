@@ -49,7 +49,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PI_FLOOR = "0.84.2";
-const TESTED_PI_VERSIONS = ["0.84.2", "1.0.4", "1.3.0"];
+const TESTED_PI_VERSIONS = ["0.84.2", "1.0.4", "1.3.0", "1.5.2"];
 const PI_CODING_AGENT = "@earendil-works/pi-coding-agent";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -215,7 +215,7 @@ async function loadModule(piDir, specifier) {
 /**
  * Pi's own `@earendil-works/pi-*` dependencies whose installed version differs from pi-coding-agent's.
  * Releases before Pi 1.3.0 declare them with caret ranges, so a fresh install now pulls the newest
- * internals; Pi 1.0.x and 1.1.0 then fail to load. Pi 1.3.0 pins them exactly.
+ * internals; Pi 1.0.x and 1.1.0 then fail to load. Pi 1.3.0 and later pin them exactly.
  */
 function mixedInternalPackages(piDir, version) {
 	const dependencies = readJson(join(piDir, "package.json")).dependencies ?? {};
@@ -247,7 +247,7 @@ async function checkPi() {
 		warnings.push(
 			`Pi ${version} is installed with internal packages from other releases (${mixed.join(", ")}). ` +
 				`Pi releases before 1.3.0 do not pin them, so a fresh install mixes versions and Pi 1.0.x and 1.1.0 fail to load; ` +
-				`install Pi 1.3.0, or pin each of these packages to ${version}`,
+				`install Pi ${TESTED_PI_VERSIONS.at(-1)}, or pin each of these packages to ${version}`,
 		);
 	}
 

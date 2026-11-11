@@ -5,13 +5,14 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	type BashOperations,
 	createBashToolDefinition,
 	type ExtensionAPI,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
 	type ActionFusionOptions,
 	assertUnchangedBeforeCommand,
@@ -21,6 +22,13 @@ import {
 import { withFusedFileQueue } from "../src/sol-pi/extensions/action-fusion/file-queue.ts";
 import { runFusedMutation } from "../src/sol-pi/extensions/action-fusion/then-run.ts";
 import { componentText, fakeToolContext, plainTheme, type ToolExecuteContext } from "./helpers.ts";
+
+// Pi >= 1.5 highlights write content inside renderCall, which reads the global
+// interactive theme. Interactive Pi initializes it before rendering; tests must too.
+beforeAll(() => {
+	const initTheme = (piCodingAgent as { initTheme?: (name?: string, watch?: boolean) => void }).initTheme;
+	initTheme?.("dark", false);
+});
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -207,8 +215,11 @@ describe("action fusion then_run", () => {
 			expect(succeeded.call).toContain("Money saved · 1 model round-trip avoided");
 			expect(succeeded.rendered).toContain("Money saved · 1 model round-trip avoided");
 			const failed = render(true);
-			expect(failed.call).not.toContain("SoL-Pi");
-			expect(failed.rendered).not.toContain("SoL-Pi");
+			// Match the banner text, not the bare product name, which may appear in the checkout path.
+			for (const output of [failed.call, failed.rendered]) {
+				expect(output).not.toContain("SoL-Pi ·");
+				expect(output).not.toContain("Money saved");
+			}
 		}
 	});
 

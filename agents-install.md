@@ -7,7 +7,7 @@ Installation and configuration are complete only when Pi remains unmodified, the
 ## Rules
 
 - Do not modify, patch, fork, or vendor upstream Pi. SoL-Pi must load as a standalone extension through Pi's public package interface.
-- Use Node.js 22.19 or newer and a tested Pi release: `@earendil-works/pi-coding-agent@1.3.0` (latest tested, the default) or `@earendil-works/pi-coding-agent@0.84.2` (supported floor). `@earendil-works/pi-coding-agent@1.0.4` is also tested, but do not install it or any other Pi 1.0.x or 1.1.0 release fresh: those releases do not pin their internal packages, so a fresh install now pairs them with newer ones and Pi fails to start. Treat any other Pi version as a compatibility change: `scripts/check-pi-compat.mjs --strict` rejects it, so use it only on explicit user direction and after the full suite passes against it.
+- Use Node.js 22.19 or newer and a tested Pi release: `@earendil-works/pi-coding-agent@1.5.2` (latest tested, the default), `@earendil-works/pi-coding-agent@1.3.0` (tested), or `@earendil-works/pi-coding-agent@0.84.2` (supported floor). `@earendil-works/pi-coding-agent@1.0.4` is also tested, but do not install it or any other Pi 1.0.x or 1.1.0 release fresh: those releases do not pin their internal packages, so a fresh install now pairs them with newer ones and Pi fails to start. Treat any other Pi version as a compatibility change: `scripts/check-pi-compat.mjs --strict` rejects it, so use it only on explicit user direction and after the full suite passes against it.
 - Do not clean, reset, switch, or overwrite unrelated repository changes.
 - Do not print, log, commit, upload, or include any secret in a command line. Check only whether a credential is present.
 - Keep SoL-Pi settings in `sol-pi.json`. The Evidence-Preserving Reducer provider/model route is a SoL-Pi setting; provider URLs, credentials, the main agent model, and shell behavior remain Pi settings.
@@ -46,16 +46,16 @@ node scripts/check-pi-compat.mjs --strict
 npx vitest run tests/all-mechanisms.test.ts
 ```
 
-`npm run check` covers type checking, the complete test suite, and package inspection. These checks run against the checkout's development dependency, Pi 1.3.0. `tests/all-mechanisms.test.ts` confirms that one all-enabled configuration registers all four mechanisms against Pi's public extension API. The tests run without a model provider.
+`npm run check` covers type checking, the complete test suite, and package inspection. These checks run against the checkout's development dependency, Pi 1.5.2. `tests/all-mechanisms.test.ts` confirms that one all-enabled configuration registers all four mechanisms against Pi's public extension API. The tests run without a model provider.
 
 Stop if any command fails. Do not hide a failure with `|| true` or replace `npm ci` with an unlocked install.
 
 ## Phase 2: install Pi and SoL-Pi
 
-Install the tested Pi release without changing its source. Use `1.3.0` unless the user asked for `0.84.2`:
+Install the tested Pi release without changing its source. Use `1.5.2` unless the user asked for `1.3.0` or `0.84.2`. Pi 1.3.0 pins `undici` 8.10.2, which has a high-severity advisory; prefer 1.5.2:
 
 ```bash
-npm install --global --ignore-scripts @earendil-works/pi-coding-agent@1.3.0
+npm install --global --ignore-scripts @earendil-works/pi-coding-agent@1.5.2
 pi --version
 ```
 
