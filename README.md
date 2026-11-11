@@ -98,6 +98,8 @@ With `"strategy": "dynamic-ai"`, Live Compact runs global maintenance cycles ins
 - **Who summarizes.** A summary model (the working model by default, or a configured route such as a DeepSeek flash model) chooses segments and writes summaries; a verification model checks each summary against its original.
 - **How it commits.** Edits are committed as one crash-safe batch, and the originals stay readable with `context_recall`.
 
+You can set the summary and verification models per session or as the global default with `/live-compact model <summary|verification> <provider>/<model> [--global]`. Running sessions pick up a global change from their next cycle. `/live-compact now` runs a cycle on demand.
+
 Safety does not depend on the AI. A mid-run request above the safe input limit pauses the run, an input that cannot fit is rejected, Pi's own threshold compaction is cancelled only while the request fits, and an interrupted batch is completed before the next request. The verification stage G0 pinned the Pi behavior this relies on in real sessions. Comparisons on real providers (G4) are still pending, so `local-tools` remains the default.
 
 Live Compact does not do these yet:

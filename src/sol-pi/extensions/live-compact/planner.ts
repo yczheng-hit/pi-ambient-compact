@@ -11,6 +11,7 @@
  */
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { LiveCompactCallConfig } from "../../live-compact-config.mjs";
 import type { Segment } from "./segments.ts";
 
 export interface PlanRequest {
@@ -20,6 +21,10 @@ export interface PlanRequest {
 	/** The user's turns, verbatim, so the planner knows what the work is about. */
 	readonly userTurns: readonly string[];
 	readonly signal: AbortSignal;
+	/** Real tokens per estimated token (provider-usage calibration); 1 when unknown. */
+	readonly tokenRatio?: number;
+	/** The effective routes for this cycle; the configured ones when omitted. */
+	readonly routes?: { readonly summary: LiveCompactCallConfig; readonly verification: LiveCompactCallConfig };
 }
 
 export interface PlanSelection {
@@ -38,6 +43,8 @@ export interface PlanResult {
 	readonly usage: PlanUsage;
 	/** Why nothing was selected, or why some selections were dropped. */
 	readonly notes: readonly string[];
+	/** Set when a model call failed (error, rate limit after retries, truncation) rather than declined. */
+	readonly failure?: string;
 }
 
 export type Planner = (request: PlanRequest, ctx: ExtensionContext) => Promise<PlanResult>;

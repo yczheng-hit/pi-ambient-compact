@@ -9,32 +9,44 @@
  * one batch of edits. Afterwards history only grows again until the next cycle
  * is due. See docs/live-compact-dynamic-plan.md.
  *
- * Cycles run at the two boundaries G0 verified: `turn_end` (mid-run; the next
- * request already uses the edited context) and `agent_before_settle` (end of
- * run; no extra request). Safety does not depend on a cycle succeeding:
+ * Cycles run at the two boundaries G0 verified, `turn_end` (mid-run) and
+ * `agent_before_settle` (end of run), where the batch is returned as boundary
+ * drafts. A cycle can also run outside a boundary: `/live-compact now`, or an
+ * input that would not fit. There only the batch's begin marker is appended
+ * (custom entries can be appended at any time); the interrupted-batch path then
+ * applies the edits in memory to the next request and persists them at the
+ * next boundary.
  *
- * - an interrupted batch is completed at the next boundary, and the request
- *   before that boundary gets the remaining edits in memory (`context` hook);
+ * Safety does not depend on a cycle succeeding:
+ *
  * - a mid-run context still above the safe input limit stops the run with
  *   `ctx.abort()` rather than sending the request;
- * - a single input that cannot fit is rejected at `input`;
- * - Pi's own threshold compaction is cancelled only while the request fits.
+ * - an input that cannot fit, even after an immediate cycle, is rejected;
+ * - Pi's own threshold compaction is cancelled only while the request fits;
+ * - an interrupted batch is completed in memory and at the next boundary.
+ *
+ * Above the urgent level a failed cycle is retried after URGENT_RETRY_MS
+ * without waiting for growth, and at once when the model routes change, so a
+ * session at the limit is never locked behind backoff.
  *
  * Nothing here deletes raw history: every edit is a `context_edit`, and the
  * originals of a summarized segment stay readable through `context_recall`.
  */
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionFactory,
-	SessionBoundaryDraft,
-	SessionEntry,
-	TurnEndEvent,
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+	type ExtensionFactory,
+	getAgentDir,
+	type ProjectedSessionEntry,
+	type SessionBoundaryDraft,
+	type SessionEntry,
+	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { findConfigPath } from "../../config.ts";
 import type { LiveCompactConfig } from "../../live-compact-config.mjs";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { renderSolPiTool } from "../../tui.ts";
@@ -43,27 +55,31 @@ import { countLines, hash, readRecallChunk, type RecallChunk } from "../observat
 import { resolveCompactionTokenSettings } from "../online-context-compact/extension.ts";
 import { archiveText, type ArchivedSegment, CONTEXT_ARCHIVE_PATTERN, contextArchivePath, rebuildArchive } from "./archive.ts";
 import {
+	CHARS_PER_TOKEN,
 	calibrationSample,
 	ema,
 	estimateMessagesTokens,
 	estimateTextTokens,
 	IMAGE_CHARS,
-	CHARS_PER_TOKEN,
 	type PressureLevels,
 	pressureLevels,
 	requestInputTokens,
 } from "./budget.ts";
-import { batchDrafts, completionDrafts, findIncompleteBatches, orderPrefixSafe, type PlannedEdit } from "./commit.ts";
+import { BATCH_BEGIN, batchDrafts, completionDrafts, findIncompleteBatches, orderPrefixSafe, type PlannedEdit } from "./commit.ts";
 import { type Planner, type PlanUsage, renderSegment, userTurns } from "./planner.ts";
+import { describeRoute, parseRouteArgument, ROUTE_KINDS, ROUTES_ENTRY, type RouteKind, RouteStore, writeGlobalRoute } from "./routes.ts";
 import { indexSegments, type Segment, segmentEdits, summaryCarrierText } from "./segments.ts";
 import { validateToolPairing } from "./validator.ts";
 
 export const DYNAMIC_STATE_ENTRY = "sol-pi-live-compact-dynamic-v1";
 export const DYNAMIC_STATUS_KEY = "sol-pi-live-compact";
-/** Largest candidate pool handed to one planning call, in estimated tokens. */
-export const MAX_POOL_TOKENS = 300_000;
+/** Largest candidate pool handed to one planning call, in real (calibrated) tokens. */
+export const MAX_POOL_TOKENS = 150_000;
+/** Above the urgent level, a failed cycle is retried after this long without waiting for growth. */
+export const URGENT_RETRY_MS = 120_000;
 
 export type CycleOutcome = "committed" | "insufficient" | "no_selection" | "invalid" | "failed" | "aborted";
+export type CycleTrigger = "turn_end" | "agent_before_settle" | "command" | "input";
 
 /** Persisted after every cycle that ran the planner, so cooldown and backoff survive restarts. */
 export interface DynamicState {
@@ -74,12 +90,16 @@ export interface DynamicState {
 	readonly outcome: CycleOutcome;
 	readonly reclaimed: number;
 	readonly calls: number;
+	/** Wall-clock time of the cycle, for the urgent retry rule. */
+	readonly at?: number;
+	/** The model routes the cycle used; a change allows an immediate retry. */
+	readonly routes?: string;
 	readonly batchId?: string;
 	readonly note?: string;
 }
 
 export interface CycleReport {
-	readonly boundary: "turn_end" | "agent_before_settle";
+	readonly boundary: CycleTrigger;
 	readonly projected: number;
 	readonly after: number;
 	readonly levels: PressureLevels;
@@ -95,14 +115,26 @@ export interface DynamicCompactOptions {
 	readonly planner: Planner;
 	/** Test hook. */
 	readonly onReport?: (report: CycleReport) => void;
+	/** The effective sol-pi.json for global routes; resolved like the startup configuration by default. */
+	readonly configPath?: (ctx: ExtensionContext) => string | undefined;
+	/** Test hook: wall clock. */
+	readonly now?: () => number;
 }
 
-type Boundary = "turn_end" | "agent_before_settle";
 type BoundaryEvent = TurnEndEvent & { type: string };
 type SettingsSource = { readonly getSettings?: () => unknown };
+type CycleResult = {
+	readonly outcome: CycleOutcome;
+	readonly after: number;
+	readonly report: CycleReport;
+	/** The batch drafts (begin marker, edits, end marker), when committed. */
+	readonly batch: SessionBoundaryDraft[];
+	readonly state: DynamicState;
+};
 
 const RECALL_MAX_BYTES = 16 * 1024;
 const RECALL_LIMITS = { maxBytes: RECALL_MAX_BYTES - 512, maxLines: 398 };
+const NO_USAGE: PlanUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
 
 function hasBoundaryApi(event: Partial<BoundaryEvent>): boolean {
 	const context = event.context as { contextEntries?: unknown; contextMessages?: unknown } | undefined;
@@ -167,13 +199,18 @@ function cycleSignal(runSignal: AbortSignal | undefined, timeoutMs: number): Abo
 
 export function createDynamicCompactExtension(options: DynamicCompactOptions): ExtensionFactory {
 	const { config, planner } = options;
+	const now = options.now ?? Date.now;
+	const configPathOf =
+		options.configPath ?? ((ctx: ExtensionContext) => findConfigPath(ctx.cwd, getAgentDir(), ctx.isProjectTrusted()));
 
 	return (pi: ExtensionAPI) => {
 		let calibration: number | undefined;
 		let levels: PressureLevels | undefined;
 		let lastAfter: number | undefined;
 		let lastReport: CycleReport | undefined;
-		let noGain: { readonly requestCount: number; readonly projected: number } | undefined;
+		let noGain: { readonly projected: number } | undefined;
+		let running = false;
+		const routeStore = new RouteStore(config);
 		const ledgers = new Map<string, Ledger>();
 
 		const record = async (ctx: ExtensionContext, entry: Record<string, unknown>): Promise<void> => {
@@ -206,7 +243,15 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		pi.on("session_compact", reset);
 		pi.on("model_select", reset);
 
-		/** Calibrated input estimate for the next request, from the boundary preview. */
+		const routesFor = (ctx: ExtensionContext) => routeStore.effective(ctx.sessionManager.getBranch(), configPathOf(ctx));
+		const routeFingerprint = (ctx: ExtensionContext): string => {
+			const routes = routesFor(ctx);
+			return ROUTE_KINDS.map((kind) => describeRoute(routes[kind].call)).join(" | ");
+		};
+		const levelsFor = (ctx: ExtensionContext) =>
+			pressureLevels(ctx.model?.contextWindow, ctx.model?.maxTokens, config, piCompactionReserve(pi, ctx));
+
+		/** Calibrated input estimate for the next request, from a boundary preview. */
 		const measure = (event: BoundaryEvent): number => {
 			const messages = event.context.contextMessages;
 			const lastAssistant = messages.findLastIndex((message) => message.role === "assistant");
@@ -227,113 +272,101 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			options.onReport?.(value);
 		};
 
-		const boundary = async (boundaryName: Boundary, event: BoundaryEvent, ctx: ExtensionContext) => {
-			if (!hasBoundaryApi(event) || event.outcome !== "completed") return;
-			const branch = ctx.sessionManager.getBranch();
-
-			// 1. Finish an interrupted batch before anything else.
-			const incomplete = findIncompleteBatches(branch);
-			if (incomplete.length > 0) {
-				await record(ctx, { event: "batch_completed", batches: incomplete.map((batch) => batch.batchId) });
-				return { entries: [...event.entries, ...incomplete.flatMap(completionDrafts)] };
-			}
-
-			levels = pressureLevels(ctx.model?.contextWindow, ctx.model?.maxTokens, config, piCompactionReserve(pi, ctx));
-			if (!levels) return;
-			const window = levels.contextWindow;
-			const projected = measure(event);
-			lastAfter = projected;
+		/**
+		 * One maintenance cycle on `entries`. `force` skips cooldown, backoff, and minimum savings
+		 * (explicit `/live-compact now`, or an input that would not fit).
+		 */
+		const runCycle = async (
+			ctx: ExtensionContext,
+			trigger: CycleTrigger,
+			entries: readonly ProjectedSessionEntry[],
+			messages: readonly AgentMessage[],
+			projected: number,
+			currentLevels: PressureLevels,
+			force: boolean,
+		): Promise<CycleResult | CycleReport> => {
+			const window = currentLevels.contextWindow;
 			const ratio = calibration ?? 1;
+			const branch = ctx.sessionManager.getBranch();
 			const skipped = (reason: string, segments = 0): CycleReport => ({
-				boundary: boundaryName,
+				boundary: trigger,
 				projected,
 				after: projected,
-				levels: levels!,
+				levels: currentLevels,
 				outcome: "skipped",
 				reason,
 				segments,
 				selected: 0,
-				usage: { calls: 0, inputTokens: 0, outputTokens: 0 },
+				usage: NO_USAGE,
 			});
-			const admit = (after: number) => {
-				// A mid-run request that cannot fit is not sent.
-				if (boundaryName === "turn_end" && after > levels!.safeInputLimit) {
-					notify(
-						ctx,
-						`Live Compact: the context (${percent(after, window)}) is above the safe input limit and could not be reduced safely; the run is paused. Recall or trim history, or switch to a larger model, then continue.`,
-						"warning",
-					);
-					ctx.abort();
-				}
-			};
 
-			// 2. Is a cycle due?
-			if (projected < levels.start) {
-				report(skipped("below_start"));
-				admit(projected);
-				return;
-			}
-			const urgent = projected >= levels.ceiling;
+			// Is a cycle due?
+			if (!force && projected < currentLevels.start) return skipped("below_start");
+			const urgent = projected >= currentLevels.ceiling;
 			const requests = requestCount(branch);
 			const state = latestState(branch);
+			const routes = routeFingerprint(ctx);
 			const { cooldownRequests, retryGrowthRatio, minSavingsRatio, timeoutMs } = config.maintenance;
-			if (state && !urgent && requests - state.requestCount < cooldownRequests) {
-				report(skipped("cooldown"));
-				return;
-			}
-			if (state && state.outcome !== "committed" && projected < state.projected + retryGrowthRatio * window) {
-				// After a failed or unprofitable cycle, wait for real growth, even when urgent.
-				report(skipped("backoff"));
-				admit(projected);
-				return;
-			}
-			if (!urgent && noGain && projected < noGain.projected + retryGrowthRatio * window) {
-				report(skipped("no_gain"));
-				return;
+			if (!force) {
+				if (state && !urgent && requests - state.requestCount < cooldownRequests) return skipped("cooldown");
+				const routesChanged = state?.routes !== undefined && state.routes !== routes;
+				const urgentRetryDue = urgent && state?.at !== undefined && now() - state.at >= URGENT_RETRY_MS;
+				if (state && state.outcome !== "committed" && !routesChanged && !urgentRetryDue && projected < state.projected + retryGrowthRatio * window) {
+					return skipped("backoff");
+				}
+				if (!urgent && noGain && projected < noGain.projected + retryGrowthRatio * window) return skipped("no_gain");
 			}
 
-			// 3. Candidates.
-			const index = indexSegments(event.context.contextEntries, {
-				keepRecentToolRounds: config.protection.keepRecentToolRounds,
-			});
-			const goal = Math.max(0, projected - levels.target);
+			// Candidates, within the real-token pool limit.
+			const index = indexSegments(entries, { keepRecentToolRounds: config.protection.keepRecentToolRounds });
 			const minSavings = Math.ceil(minSavingsRatio * window);
+			// An explicit or input-driven cycle reclaims at least the minimum, even below the target.
+			const goal = Math.max(0, projected - currentLevels.target, force ? minSavings : 0);
 			const pool: Segment[] = [];
 			let poolTokens = 0;
 			for (const segment of index.segments) {
-				if (poolTokens * ratio >= goal * 1.5 || poolTokens + segment.tokens > MAX_POOL_TOKENS) break;
+				if (pool.length > 0 && poolTokens * ratio >= goal * 1.5) break;
+				if ((poolTokens + segment.tokens) * ratio > MAX_POOL_TOKENS) break;
 				pool.push(segment);
 				poolTokens += segment.tokens;
 			}
-			if (pool.length === 0 || (!urgent && poolTokens * ratio * 0.9 < minSavings)) {
-				noGain = { requestCount: requests, projected };
-				report(skipped(pool.length === 0 ? "no_candidates" : "below_min_savings", index.segments.length));
-				admit(projected);
-				return;
+			if (pool.length === 0 || (!force && !urgent && poolTokens * ratio * 0.9 < minSavings)) {
+				noGain = { projected };
+				return skipped(pool.length === 0 ? "no_candidates" : "below_min_savings", index.segments.length);
 			}
 
-			// 4. Plan.
+			// Plan.
 			status(ctx, "Live Compact: reviewing history…");
 			let outcome: CycleOutcome = "failed";
 			let note: string | undefined;
-			let usage: PlanUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
+			let usage: PlanUsage = NO_USAGE;
 			let after = projected;
 			let selected = 0;
-			let drafts: SessionBoundaryDraft[] = [];
-			const batchId = `lc_${requests}_${hash(pool.map((segment) => segment.id).join(",")).slice(0, 8)}`;
+			let batch: SessionBoundaryDraft[] = [];
+			const batchId = `lc_${requests}_${hash(`${now()}:${pool.map((segment) => segment.id).join(",")}`).slice(0, 8)}`;
+			const effective = routesFor(ctx);
 			try {
 				const plan = await planner(
-					{ candidates: pool, reclaimTokens: goal, userTurns: userTurns(event.context.contextMessages), signal: cycleSignal(ctx.signal, timeoutMs) },
+					{
+						candidates: pool,
+						reclaimTokens: goal,
+						userTurns: userTurns(messages),
+						signal: cycleSignal(ctx.signal, timeoutMs),
+						tokenRatio: ratio,
+						routes: { summary: effective.summary.call, verification: effective.verification.call },
+					},
 					ctx,
 				);
 				usage = plan.usage;
-				note = plan.notes.join("; ") || undefined;
+				note = [plan.failure, ...plan.notes].filter(Boolean).join("; ") || undefined;
 				const bySegment = new Map(pool.map((segment) => [segment.id, segment]));
 				const chosen = plan.selections.filter((selection) => bySegment.has(selection.segmentId) && selection.summary.trim().length > 0);
-				if (chosen.length === 0) {
+				if (plan.failure && chosen.length === 0) {
+					outcome = "failed";
+				} else if (chosen.length === 0) {
 					outcome = "no_selection";
 				} else {
-					// 5. Archive, edit, and check the result before anything is committed.
+					// Archive, edit, and check the result before anything is committed.
 					const root = runtimeRoot(ctx);
 					const edits: PlannedEdit[] = [];
 					const archived: ArchivedSegment[] = [];
@@ -361,16 +394,13 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						const saved = estimateMessagesTokens(index.messages.map((item) => item.message)) - estimateMessagesTokens(editedMessages);
 						after = projected - Math.floor(saved * ratio);
 						selected = archived.length;
-						if (!urgent && projected - after < minSavings) {
-							outcome = "insufficient";
-							after = projected;
-						} else if (after >= projected) {
+						if ((!force && !urgent && projected - after < minSavings) || after >= projected) {
 							outcome = "insufficient";
 							after = projected;
 						} else {
 							outcome = "committed";
 							const entryById = new Map(branch.map((entry) => [entry.id, entry]));
-							drafts = batchDrafts(batchId, orderPrefixSafe(edits, (id) => entryById.get(id)), { segments: archived });
+							batch = batchDrafts(batchId, orderPrefixSafe(edits, (id) => entryById.get(id)), { segments: archived });
 						}
 					}
 				}
@@ -381,55 +411,143 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				status(ctx, undefined);
 			}
 
-			const reclaimed = projected - after;
-			const stateDraft: SessionBoundaryDraft = {
-				type: "custom",
-				customType: DYNAMIC_STATE_ENTRY,
-				data: {
-					v: 1,
-					requestCount: requests,
-					projected,
-					outcome,
-					reclaimed,
-					calls: usage.calls,
-					...(outcome === "committed" ? { batchId } : {}),
-					...(note ? { note } : {}),
-				} satisfies DynamicState,
+			const state2: DynamicState = {
+				v: 1,
+				requestCount: requests,
+				projected,
+				outcome,
+				reclaimed: projected - after,
+				calls: usage.calls,
+				at: now(),
+				routes,
+				...(outcome === "committed" ? { batchId } : {}),
+				...(note ? { note: note.slice(0, 600) } : {}),
 			};
-			lastAfter = after;
 			await record(ctx, {
 				event: "cycle",
-				boundary: boundaryName,
+				trigger,
 				outcome,
 				projected,
 				after,
-				target: levels.target,
+				target: currentLevels.target,
 				segments: index.segments.length,
 				pool: pool.length,
+				poolTokens: Math.ceil(poolTokens * ratio),
 				selected,
 				calls: usage.calls,
 				inputTokens: usage.inputTokens,
 				outputTokens: usage.outputTokens,
-				...(note ? { note } : {}),
+				routes,
+				...(note ? { note: note.slice(0, 600) } : {}),
 			});
-			report({ boundary: boundaryName, projected, after, levels, outcome, reason: note ?? outcome, segments: index.segments.length, selected, usage });
+			const cycleReport: CycleReport = {
+				boundary: trigger,
+				projected,
+				after,
+				levels: currentLevels,
+				outcome,
+				reason: note ?? outcome,
+				segments: index.segments.length,
+				selected,
+				usage,
+			};
 			if (outcome === "committed") {
 				notify(ctx, `Live Compact: summarized ${selected} history segment(s), ${percent(projected, window)} → ${percent(after, window)}.`, "info");
 			} else if (outcome !== "aborted") {
-				noGain = { requestCount: requests, projected };
+				noGain = { projected };
+				if (outcome === "failed") notify(ctx, `Live Compact: maintenance failed (${(note ?? "").slice(0, 200)}). History is unchanged.`, "warning");
 			}
-			admit(after);
-			return { entries: [...event.entries, ...drafts, stateDraft] };
+			return { outcome, after, report: cycleReport, batch, state: state2 };
+		};
+
+		const isResult = (value: CycleResult | CycleReport): value is CycleResult => "state" in value;
+
+		/** Run a cycle outside a boundary and hand its batch to the interrupted-batch path. */
+		const runOutsideBoundary = async (ctx: ExtensionContext, trigger: "command" | "input"): Promise<CycleResult | CycleReport | string> => {
+			if (running) return "a maintenance cycle is already running";
+			if (findIncompleteBatches(ctx.sessionManager.getBranch()).length > 0) return "a batch is already pending; it applies to the next request";
+			const currentLevels = levelsFor(ctx);
+			if (!currentLevels) return "the model window is unknown";
+			levels = currentLevels;
+			const projection = ctx.sessionManager.buildSessionProjection();
+			const projected = lastAfter ?? Math.ceil(estimateMessagesTokens(projection.messages) * (calibration ?? 1));
+			running = true;
+			try {
+				const result = await runCycle(ctx, trigger, projection.entries, projection.messages, projected, currentLevels, true);
+				if (!isResult(result)) {
+					report(result);
+					return result;
+				}
+				const begin = result.batch[0];
+				if (result.outcome === "committed" && begin?.type === "custom") {
+					pi.appendEntry(begin.customType, begin.data);
+					lastAfter = result.after;
+				}
+				pi.appendEntry(DYNAMIC_STATE_ENTRY, result.state);
+				report(result.report);
+				return result;
+			} finally {
+				running = false;
+			}
+		};
+
+		const boundary = async (trigger: "turn_end" | "agent_before_settle", event: BoundaryEvent, ctx: ExtensionContext) => {
+			if (!hasBoundaryApi(event) || event.outcome !== "completed" || running) return;
+			const branch = ctx.sessionManager.getBranch();
+
+			// Finish an interrupted or out-of-boundary batch before anything else.
+			const incomplete = findIncompleteBatches(branch);
+			if (incomplete.length > 0) {
+				await record(ctx, { event: "batch_completed", batches: incomplete.map((batch) => batch.batchId) });
+				return { entries: [...event.entries, ...incomplete.flatMap(completionDrafts)] };
+			}
+
+			const currentLevels = levelsFor(ctx);
+			if (!currentLevels) return;
+			levels = currentLevels;
+			const projected = measure(event);
+			lastAfter = projected;
+			const admit = (after: number) => {
+				// A mid-run request that cannot fit is not sent.
+				if (trigger === "turn_end" && after > currentLevels.safeInputLimit) {
+					notify(
+						ctx,
+						`Live Compact: the context (${percent(after, currentLevels.contextWindow)}) is above the safe input limit and could not be reduced; the run is paused. Run /live-compact now (optionally after /live-compact model summary <provider>/<model>) or /compact.`,
+						"warning",
+					);
+					ctx.abort();
+				}
+			};
+
+			running = true;
+			let result: CycleResult | CycleReport;
+			try {
+				result = await runCycle(ctx, trigger, event.context.contextEntries, event.context.contextMessages, projected, currentLevels, false);
+			} finally {
+				running = false;
+			}
+			if (!isResult(result)) {
+				report(result);
+				admit(projected);
+				return;
+			}
+			lastAfter = result.after;
+			report(result.report);
+			admit(result.after);
+			return {
+				entries: [...event.entries, ...result.batch, { type: "custom", customType: DYNAMIC_STATE_ENTRY, data: result.state } as SessionBoundaryDraft],
+			};
 		};
 
 		pi.on("turn_end", (event, ctx) => boundary("turn_end", event as BoundaryEvent, ctx));
 		pi.on("agent_before_settle", (event, ctx) => boundary("agent_before_settle", event as unknown as BoundaryEvent, ctx));
 
-		// Between a crash mid-batch and the next boundary, send the intended edits, not the cut prefix.
+		// Before an interrupted or out-of-boundary batch is persisted, send its edits in memory.
 		pi.on("context", (event, ctx) => {
-			const incomplete = findIncompleteBatches(ctx.sessionManager.getBranch());
+			const branch = ctx.sessionManager.getBranch();
+			const incomplete = findIncompleteBatches(branch);
 			if (incomplete.length === 0) return;
-			const byId = new Map(ctx.sessionManager.getBranch().map((entry) => [entry.id, entry]));
+			const byId = new Map(branch.map((entry) => [entry.id, entry]));
 			const replace = new Map<string, unknown>();
 			const omit = new Set<string>();
 			for (const edit of incomplete.flatMap((batch) => batch.remaining)) {
@@ -449,15 +567,17 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			return { messages: keyed.filter(({ key }) => !omit.has(key)).map(({ message }) => message) };
 		});
 
-		// One input that cannot fit is not sent.
-		pi.on("input", (event, ctx) => {
+		// An input that cannot fit first gets an immediate cycle; if it still cannot fit, it is not sent.
+		pi.on("input", async (event, ctx) => {
 			if (!levels || lastAfter === undefined) return;
 			const images = Array.isArray((event as { images?: unknown[] }).images) ? (event as { images: unknown[] }).images.length : 0;
 			const incoming = Math.ceil((estimateTextTokens(event.text) + (images * IMAGE_CHARS) / CHARS_PER_TOKEN) * (calibration ?? 1));
 			if (lastAfter + incoming <= levels.safeInputLimit) return;
+			const attempt = await runOutsideBoundary(ctx, "input");
+			if (lastAfter + incoming <= levels.safeInputLimit) return;
 			notify(
 				ctx,
-				`Live Compact: this input (~${incoming} tokens) does not fit the remaining context (${percent(lastAfter, levels.contextWindow)} used, safe limit ${percent(levels.safeInputLimit, levels.contextWindow)}). It was not sent; shorten it or attach it as a file.`,
+				`Live Compact: this input (~${incoming} tokens) does not fit the remaining context (${percent(lastAfter, levels.contextWindow)} used, safe limit ${percent(levels.safeInputLimit, levels.contextWindow)})${typeof attempt === "string" ? "" : `; maintenance: ${attempt.outcome === "skipped" ? attempt.reason : attempt.outcome}`}. It was not sent; shorten it, or run /compact.`,
 				"warning",
 			);
 			return { action: "handled" as const };
@@ -513,26 +633,87 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			},
 		});
 
+		const routeLines = (ctx: ExtensionContext): string[] => {
+			const routes = routesFor(ctx);
+			const lines = ROUTE_KINDS.map((kind) => `${kind}: ${describeRoute(routes[kind].call)} (${routes[kind].source})`);
+			if (routes.globalError) lines.push(`global configuration error, last good routes in use: ${routes.globalError}`);
+			return lines;
+		};
+
+		const statusLines = (ctx: ExtensionContext): string[] => {
+			const window = levels?.contextWindow;
+			const state = latestState(ctx.sessionManager.getBranch());
+			return [
+				"Live Compact: dynamic-ai",
+				levels
+					? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, urgent ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens`
+					: "levels: unknown until the first completed turn with a known model window",
+				`context: ${percent(lastAfter, window)} after the last boundary`,
+				...routeLines(ctx),
+				lastReport
+					? `last boundary: ${lastReport.outcome} (${lastReport.reason.slice(0, 200)}); segments ${lastReport.segments}, selected ${lastReport.selected}, model calls ${lastReport.usage.calls}`
+					: "last boundary: none yet",
+				state
+					? `last cycle: ${state.outcome} at request ${state.requestCount}, ${percent(state.projected, window)}, reclaimed ${state.reclaimed} tokens${state.note ? ` (${state.note.slice(0, 200)})` : ""}`
+					: "last cycle: none in this branch",
+				"commands: /live-compact now | /live-compact model [summary|verification <provider>/<model>|default [--global]]",
+			];
+		};
+
+		/** `/live-compact model <kind> <provider/model|default> [--global]` */
+		const setRoute = (args: readonly string[], ctx: ExtensionContext): string => {
+			const kind = args[0] as RouteKind | undefined;
+			if (!kind || !ROUTE_KINDS.includes(kind)) return "usage: /live-compact model <summary|verification> <provider>/<model>|default [--global]";
+			const global = args.includes("--global");
+			const value = args.filter((arg) => !arg.startsWith("--"))[1];
+			const route = value === undefined ? undefined : parseRouteArgument(value);
+			if (route === undefined) return "expected <provider>/<model> or default";
+			if (route && !(ctx.modelRegistry as { find?: (provider: string, model: string) => unknown }).find?.(route.provider!, route.model!)) {
+				return `model ${route.provider}/${route.model} is not registered in Pi; nothing changed`;
+			}
+			if (global) {
+				const path = configPathOf(ctx);
+				if (!path) return "no sol-pi.json is in effect; nothing changed";
+				writeGlobalRoute(path, kind, route);
+				return `global ${kind} model: ${route ? describeRoute(route) : "working model"} (written to ${path}; running sessions use it from their next cycle)`;
+			}
+			pi.appendEntry(ROUTES_ENTRY, { v: 1, [kind]: route });
+			return `session ${kind} model: ${route ? describeRoute(route) : "cleared; global or startup setting applies"}`;
+		};
+
 		pi.registerCommand("live-compact", {
-			description: "Show Live Compact (dynamic-ai) context levels and the last maintenance cycle",
-			handler: async (_args, ctx) => {
-				const window = levels?.contextWindow;
-				const state = latestState(ctx.sessionManager.getBranch());
-				const lines = [
-					"Live Compact: dynamic-ai",
-					levels
-						? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, urgent ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens`
-						: "levels: unknown until the first completed turn with a known model window",
-					`context: ${percent(lastAfter, window)} after the last boundary`,
-					lastReport
-						? `last boundary: ${lastReport.outcome} (${lastReport.reason}); segments ${lastReport.segments}, selected ${lastReport.selected}, model calls ${lastReport.usage.calls}`
-						: "last boundary: none yet",
-					state
-						? `last cycle: ${state.outcome} at request ${state.requestCount}, ${percent(state.projected, window)} → reclaimed ${state.reclaimed} tokens${state.note ? ` (${state.note})` : ""}`
-						: "last cycle: none in this branch",
-				];
-				ctx.ui.notify(lines.join("\n"), "info");
+			description: "Live Compact (dynamic-ai): status, run maintenance now, or set the summary/verification model",
+			getArgumentCompletions: (prefix) => {
+				const options = ["status", "now", "model", "model summary ", "model verification ", "model summary default", "model verification default"];
+				return options.filter((option) => option.startsWith(prefix)).map((option) => ({ value: option, label: option }));
+			},
+			handler: async (args, ctx) => {
+				const parts = args.trim().split(/\s+/u).filter(Boolean);
+				const [command, ...rest] = parts;
+				try {
+					if (!command || command === "status") {
+						ctx.ui.notify(statusLines(ctx).join("\n"), "info");
+					} else if (command === "now") {
+						const result = await runOutsideBoundary(ctx, "command");
+						const text =
+							typeof result === "string"
+								? result
+								: "state" in result
+									? `maintenance ${result.outcome}: ${percent(result.report.projected, result.report.levels.contextWindow)} → ${percent(result.after, result.report.levels.contextWindow)}${result.outcome === "committed" ? " (applies from the next request)" : ""}${result.report.reason !== result.outcome ? `; ${result.report.reason.slice(0, 300)}` : ""}`
+									: `maintenance skipped: ${result.reason}`;
+						ctx.ui.notify(`Live Compact: ${text}`, "info");
+					} else if (command === "model") {
+						ctx.ui.notify(rest.length === 0 ? routeLines(ctx).join("\n") : `Live Compact: ${setRoute(rest, ctx)}`, "info");
+					} else {
+						ctx.ui.notify(`Live Compact: unknown subcommand ${command}\n${statusLines(ctx).at(-1)}`, "warning");
+					}
+				} catch (error) {
+					ctx.ui.notify(`Live Compact: ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
 			},
 		});
 	};
 }
+
+// The begin marker type, re-exported for callers that inspect pending batches.
+export { BATCH_BEGIN };

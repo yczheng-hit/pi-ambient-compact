@@ -232,3 +232,156 @@ describe("AI planner", () => {
 		expect(plan.notes).toContain("1 candidate(s) did not fit the summary model");
 	});
 });
+
+// ---------------------------------------------------------------------------------------------
+
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { isTransientFailure } from "../src/sol-pi/extensions/live-compact/ai-planner.ts";
+import { parseRouteArgument, ROUTES_ENTRY, RouteStore, writeGlobalRoute } from "../src/sol-pi/extensions/live-compact/routes.ts";
+
+describe("model routes", () => {
+	const routeEntry = (data: unknown) => ({ type: "custom", id: `r${ids++}`, parentId: null, timestamp: "", customType: ROUTES_ENTRY, data }) as unknown as SessionEntry;
+	const fileConfig = (summary?: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+		version: 1,
+		observationPack: true,
+		liveCompact: { enabled: true, strategy: "dynamic-ai", ...(summary ? { summary } : {}) },
+		...extra,
+	});
+
+	it("parses provider/model ids with slashes, default, and rejects the rest", () => {
+		expect(parseRouteArgument("nvidia-inference/nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017")).toEqual({
+			provider: "nvidia-inference",
+			model: "nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017",
+		});
+		expect(parseRouteArgument("default")).toBeNull();
+		for (const bad of ["", "nomodel", "/model", "provider/"]) expect(parseRouteArgument(bad)).toBeUndefined();
+	});
+
+	it("applies session over global over startup, and re-reads the global file when it changes", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lc-routes-"));
+		try {
+			const path = join(dir, "sol-pi.json");
+			writeFileSync(path, JSON.stringify(fileConfig({ provider: "g", model: "one", timeoutMs: 60_000 })));
+			const store = new RouteStore(parseLiveCompactConfig({ enabled: true, strategy: "dynamic-ai", summary: { provider: "s", model: "start" } }));
+			expect(store.effective([], undefined).summary).toMatchObject({ source: "startup", call: { provider: "s", model: "start" } });
+			expect(store.effective([], path).summary).toMatchObject({ source: "global", call: { provider: "g", model: "one", timeoutMs: 60_000 } });
+			// A session override wins and keeps the global route options; null follows the working model.
+			const session = store.effective([routeEntry({ v: 1, summary: { provider: "x", model: "sess" } })], path).summary;
+			expect(session).toMatchObject({ source: "session", call: { provider: "x", model: "sess", timeoutMs: 60_000 } });
+			const cleared = store.effective([routeEntry({ v: 1, summary: null })], path).summary;
+			expect(cleared.source).toBe("session");
+			expect(cleared.call.provider).toBeUndefined();
+			// The latest override of a kind wins; another kind is untouched.
+			const branch = [routeEntry({ v: 1, summary: { provider: "x", model: "a" } }), routeEntry({ v: 1, verification: { provider: "x", model: "v" } })];
+			expect(store.effective(branch, path).summary.call.model).toBe("a");
+			expect(store.effective(branch, path).verification).toMatchObject({ source: "session", call: { model: "v" } });
+			// Another session changes the global file: the next read sees it.
+			writeFileSync(path, JSON.stringify(fileConfig({ provider: "g", model: "two" })));
+			utimesSync(path, new Date(), new Date(Date.now() + 5_000));
+			expect(store.effective([], path).summary.call.model).toBe("two");
+			// A broken file keeps the last good routes and reports the error.
+			writeFileSync(path, "{ not json");
+			utimesSync(path, new Date(), new Date(Date.now() + 10_000));
+			const broken = store.effective([], path);
+			expect(broken.summary.call.model).toBe("two");
+			expect(broken.globalError).toBeDefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("writes a global route atomically, keeps other settings, and refuses an invalid file", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lc-routes-"));
+		try {
+			const path = join(dir, "sol-pi.json");
+			writeFileSync(path, JSON.stringify(fileConfig({ timeoutMs: 60_000 }, { actionFusion: false })));
+			writeGlobalRoute(path, "summary", { provider: "p", model: "m/x" });
+			const written = JSON.parse(readFileSync(path, "utf8"));
+			expect(written.actionFusion).toBe(false);
+			expect(written.liveCompact.summary).toEqual({ timeoutMs: 60_000, provider: "p", model: "m/x" });
+			writeGlobalRoute(path, "summary", null);
+			expect(JSON.parse(readFileSync(path, "utf8")).liveCompact.summary).toEqual({ timeoutMs: 60_000 });
+			writeGlobalRoute(path, "verification", null);
+			expect(JSON.parse(readFileSync(path, "utf8")).liveCompact.verification).toBeUndefined();
+			// A file that would not load is left unchanged.
+			const invalid = JSON.stringify(fileConfig(undefined, { evidencePreservingReducer: true }));
+			writeFileSync(path, invalid);
+			expect(() => writeGlobalRoute(path, "summary", { provider: "p", model: "m" })).toThrow(/cannot be combined/u);
+			expect(readFileSync(path, "utf8")).toBe(invalid);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("AI planner robustness", () => {
+	const [episode] = segments as [Segment, Segment];
+	const rateLimited = { text: "", stopReason: "error" as const, errorMessage: "429: Rate limit exceeded" };
+
+	it("recognizes transient failures only", () => {
+		expect(isTransientFailure({ ...rateLimited, ok: false, inputTokens: 0, outputTokens: 0 })).toBe(true);
+		expect(isTransientFailure({ text: "", ok: false, stopReason: "error", errorMessage: "503 Service Unavailable", inputTokens: 0, outputTokens: 0 })).toBe(true);
+		expect(isTransientFailure({ text: "", ok: false, stopReason: "error", errorMessage: "401 invalid api key", inputTokens: 0, outputTokens: 0 })).toBe(false);
+		expect(isTransientFailure({ text: "", ok: false, stopReason: "length", inputTokens: 0, outputTokens: 0 })).toBe(false);
+	});
+
+	function failingThen(answers: Array<{ text: string; stopReason?: "stop" | "error"; errorMessage?: string }>): { complete: CompleteFn; calls: () => number } {
+		let calls = 0;
+		const complete: CompleteFn = async () => {
+			calls += 1;
+			const next = answers.shift();
+			if (!next) throw new Error("unexpected model call");
+			const stopReason = next.stopReason ?? "stop";
+			return { text: next.text, ok: stopReason === "stop", stopReason, inputTokens: 1, outputTokens: 1, ...(next.errorMessage ? { errorMessage: next.errorMessage } : {}) };
+		};
+		return { complete, calls: () => calls };
+	}
+
+	it("retries a rate-limited call with growing waits, then succeeds", async () => {
+		const waits: number[] = [];
+		const { complete, calls } = failingThen([rateLimited, rateLimited, { text: select([episode.id, "ok"]) }, { text: verdicts([episode.id, true]) }]);
+		const plan = await createAiPlanner({ config, complete, sleep: async (ms) => void waits.push(ms) })(request(), ctx);
+		expect(plan.selections.map((selection) => selection.segmentId)).toEqual([episode.id]);
+		expect(plan.failure).toBeUndefined();
+		expect(waits).toEqual([5_000, 15_000]);
+		expect(calls()).toBe(4);
+	});
+
+	it("reports a failure, not a declined plan, when retries run out", async () => {
+		const { complete, calls } = failingThen([rateLimited, rateLimited, rateLimited]);
+		const plan = await createAiPlanner({ config, complete, sleep: async () => undefined })(request(), ctx);
+		expect(plan.selections).toEqual([]);
+		expect(plan.failure).toMatch(/generation stopped: error \(429: Rate limit exceeded\)/u);
+		expect(calls()).toBe(3);
+	});
+
+	it("fits candidates to the route window in real tokens", async () => {
+		const window = { ...ctx, model: { ...model, contextWindow: 40_000 } } as unknown as ExtensionContext;
+		const loose = fakeComplete([{ text: select() }]);
+		await createAiPlanner({ config, complete: loose.complete })({ ...request(), tokenRatio: 1 }, window);
+		const tight = fakeComplete([{ text: select() }]);
+		const plan = await createAiPlanner({ config, complete: tight.complete })({ ...request(), tokenRatio: 3 }, window);
+		expect(loose.prompts[0]).toContain(segments[1]!.id);
+		// With 3 real tokens per estimated token, only the first candidate fits.
+		expect(tight.prompts[0]).not.toContain(segments[1]!.id);
+		expect(plan.notes).toContain("1 candidate(s) did not fit the summary model");
+	});
+
+	it("uses the routes of the request over its own configuration", async () => {
+		const seen: string[] = [];
+		const complete: CompleteFn = async (_ctx, routeModel) => {
+			seen.push(`${routeModel.provider}/${routeModel.id}`);
+			return { text: select(), ok: true, stopReason: "stop", inputTokens: 0, outputTokens: 0 };
+		};
+		const registry = { find: (provider: string, id: string) => ({ ...model, provider, id }) };
+		const routed = { ...ctx, modelRegistry: registry } as unknown as ExtensionContext;
+		await createAiPlanner({ config, complete })(
+			{ ...request(), routes: { summary: { ...config.summary, provider: "q", model: "fast" }, verification: config.verification } },
+			routed,
+		);
+		expect(seen).toEqual(["q/fast"]);
+	});
+});

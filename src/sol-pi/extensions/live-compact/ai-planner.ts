@@ -29,6 +29,32 @@ export interface AiPlannerOptions {
 	readonly config: LiveCompactConfig;
 	/** Test hook: replaces the model call. */
 	readonly complete?: CompleteFn;
+	/** Test hook: replaces the wait between retries of a transient failure. */
+	readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+}
+
+/** Retries of one call after a transient failure (rate limit, overload, 5xx, timeout), with growing waits. */
+export const TRANSIENT_RETRIES = 2;
+const RETRY_DELAYS_MS = [5_000, 15_000];
+const TRANSIENT = /\b(429|5\d\d)\b|rate.?limit|throttl|overload|temporar|timed? ?out|ECONNRESET|ETIMEDOUT/iu;
+
+export function isTransientFailure(result: CompletionResult): boolean {
+	return result.stopReason === "error" && TRANSIENT.test(result.errorMessage ?? "");
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) return reject(signal.reason);
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(signal.reason);
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 /** Share of a route's window the prompt may use; the rest is output and margin. */
@@ -146,13 +172,16 @@ function outputBudget(call: LiveCompactCallConfig, model: Model<Api>, wanted: nu
 	return Math.max(1_024, Math.min(wanted, limit, model.maxTokens || limit));
 }
 
-/** Drop the newest candidates until the prompt fits the route's window. */
-function fitCandidates(candidates: readonly Segment[], model: Model<Api>, overheadTokens: number, outputTokens: number): Segment[] {
+/**
+ * Drop the newest candidates until the prompt fits the route's window. `ratio` turns the
+ * character estimate into real tokens, as measured against provider usage for this session.
+ */
+function fitCandidates(candidates: readonly Segment[], model: Model<Api>, overheadTokens: number, outputTokens: number, ratio: number): Segment[] {
 	const room = Math.floor(model.contextWindow * PROMPT_WINDOW_SHARE) - outputTokens - overheadTokens;
 	const fitted: Segment[] = [];
 	let used = 0;
 	for (const segment of candidates) {
-		const tokens = estimateTextTokens(segmentBlock(segment));
+		const tokens = Math.ceil(estimateTextTokens(segmentBlock(segment)) * ratio);
 		if (used + tokens > room) break;
 		fitted.push(segment);
 		used += tokens;
@@ -163,29 +192,37 @@ function fitCandidates(candidates: readonly Segment[], model: Model<Api>, overhe
 export function createAiPlanner(options: AiPlannerOptions): Planner {
 	const { config } = options;
 	const complete = options.complete ?? completeText;
+	const sleep = options.sleep ?? abortableSleep;
 	const maxCalls = config.maintenance.maxCallsPerCycle;
 	const maxRegenerations = Math.min(config.limits.maxRegenerations, Math.floor((maxCalls - 2) / 2));
 
 	return async (request, ctx: ExtensionContext) => {
 		const notes: string[] = [];
+		let failure: string | undefined;
+		const ratio = Math.max(1, request.tokenRatio ?? 1);
+		const routes = request.routes ?? { summary: config.summary, verification: config.verification };
 		let calls = 0;
 		let inputTokens = 0;
 		let outputTokens = 0;
 		const call = async (model: Model<Api>, system: string, prompt: string, maxTokens: number, timeoutMs: number): Promise<CompletionResult> => {
-			calls += 1;
-			const result = await complete(ctx, model, { system, prompt, maxTokens, signal: request.signal, timeoutMs });
-			inputTokens += result.inputTokens;
-			outputTokens += result.outputTokens;
-			return result;
+			for (let retry = 0; ; retry += 1) {
+				calls += 1;
+				const result = await complete(ctx, model, { system, prompt, maxTokens, signal: request.signal, timeoutMs });
+				inputTokens += result.inputTokens;
+				outputTokens += result.outputTokens;
+				if (!isTransientFailure(result) || retry >= TRANSIENT_RETRIES) return result;
+				notes.push(`transient failure, retrying: ${(result.errorMessage ?? "").slice(0, 120)}`);
+				await sleep(RETRY_DELAYS_MS[retry] ?? 15_000, request.signal);
+			}
 		};
-		const done = (selections: PlanSelection[]) => ({ selections, usage: { calls, inputTokens, outputTokens }, notes });
+		const done = (selections: PlanSelection[]) => ({ selections, usage: { calls, inputTokens, outputTokens }, notes, ...(failure ? { failure } : {}) });
 
-		const summaryModel = resolveRoute(ctx, config.summary);
-		const verifyModel = resolveRoute(ctx, config.verification);
+		const summaryModel = resolveRoute(ctx, routes.summary);
+		const verifyModel = resolveRoute(ctx, routes.verification);
 		const wanted = request.candidates.reduce((sum, segment) => sum + summaryCap(segment), 0) + 2_000;
-		const generationTokens = outputBudget(config.summary, summaryModel, wanted);
+		const generationTokens = outputBudget(routes.summary, summaryModel, wanted);
 		const overhead = estimateTextTokens(GENERATE_SYSTEM) + estimateTextTokens(request.userTurns.join("\n")) + 500;
-		const candidates = fitCandidates(request.candidates, summaryModel, overhead, generationTokens);
+		const candidates = fitCandidates(request.candidates, summaryModel, overhead, generationTokens, ratio);
 		if (candidates.length < request.candidates.length) notes.push(`${request.candidates.length - candidates.length} candidate(s) did not fit the summary model`);
 		if (candidates.length === 0) return done([]);
 		const byId = new Map(candidates.map((segment) => [segment.id, segment]));
@@ -199,10 +236,10 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 				GENERATE_SYSTEM,
 				generatePrompt(pending, request.userTurns, request.reclaimTokens, feedback),
 				generationTokens,
-				config.summary.timeoutMs,
+				routes.summary.timeoutMs,
 			);
 			if (!generated.ok) {
-				notes.push(`generation stopped: ${generated.stopReason}${generated.errorMessage ? ` (${generated.errorMessage})` : ""}`);
+				failure = `generation stopped: ${generated.stopReason}${generated.errorMessage ? ` (${generated.errorMessage.slice(0, 300)})` : ""}`;
 				break;
 			}
 			const parsed = parseSelections(generated.text, new Map(pending.map((segment) => [segment.id, segment])));
@@ -211,13 +248,13 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 
 			const pairs = parsed.selections.map((selection) => ({ segment: byId.get(selection.segmentId)!, summary: selection.summary }));
 			const verifyText = verifyPrompt(pairs);
-			if (estimateTextTokens(verifyText) + estimateTextTokens(VERIFY_SYSTEM) > verifyModel.contextWindow * PROMPT_WINDOW_SHARE) {
+			if ((estimateTextTokens(verifyText) + estimateTextTokens(VERIFY_SYSTEM)) * ratio > verifyModel.contextWindow * PROMPT_WINDOW_SHARE) {
 				notes.push("selected segments do not fit the verification model");
 				break;
 			}
-			const verified = await call(verifyModel, VERIFY_SYSTEM, verifyText, outputBudget(config.verification, verifyModel, 500 + pairs.length * 200), config.verification.timeoutMs);
+			const verified = await call(verifyModel, VERIFY_SYSTEM, verifyText, outputBudget(routes.verification, verifyModel, 500 + pairs.length * 200), routes.verification.timeoutMs);
 			if (!verified.ok) {
-				notes.push(`verification stopped: ${verified.stopReason}${verified.errorMessage ? ` (${verified.errorMessage})` : ""}`);
+				failure = `verification stopped: ${verified.stopReason}${verified.errorMessage ? ` (${verified.errorMessage.slice(0, 300)})` : ""}`;
 				break;
 			}
 			const verdicts = parseVerdicts(verified.text);

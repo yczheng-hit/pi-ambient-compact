@@ -7,7 +7,7 @@
  * recall, crash completion, request admission, native compaction, and the AI planner through
  * Pi's model registry with a separate faux summary provider.
  */
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -76,11 +76,17 @@ let runs = 0;
 
 async function session(options: {
 	readonly live?: Record<string, unknown>;
-	readonly planner?: Planner | ((summaryProvider: string, summaryModel: string) => Planner);
+	readonly planner?: Planner;
+	/** Builds the planner from the separate faux summary provider's route. */
+	readonly plannerFactory?: (summaryProvider: string, summaryModel: string) => Planner;
 	readonly summaryResponses?: FauxResponseStep[];
 	readonly sessionManager?: (cwd: string) => SessionManager;
 	readonly compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number };
 	readonly cwd?: string;
+	/** Route summary and verification to the separate faux summary provider. */
+	readonly summaryRoutes?: boolean;
+	readonly now?: () => number;
+	readonly configPath?: string;
 }): Promise<Run> {
 	runs += 1;
 	const name = `dyn-${runs}`;
@@ -93,18 +99,29 @@ async function session(options: {
 	const requests: Message[][] = [];
 	const reports: CycleReport[] = [];
 	const compactions: string[] = [];
-	const live = parseLiveCompactConfig({ enabled: true, strategy: "dynamic-ai", ...(options.live ?? {}) });
-	const planner =
-		typeof options.planner === "function" && options.planner.length === 2
-			? (options.planner as (provider: string, model: string) => Planner)(`${name}-summary`, `${name}-summary-model`)
-			: ((options.planner as Planner | undefined) ?? deterministicPlanner());
+	const summaryRoute = { provider: `${name}-summary`, model: `${name}-summary-model` };
+	const live = parseLiveCompactConfig({
+		enabled: true,
+		strategy: "dynamic-ai",
+		...(options.summaryRoutes ? { summary: summaryRoute, verification: summaryRoute } : {}),
+		...(options.live ?? {}),
+	});
+	const planner = options.plannerFactory
+		? options.plannerFactory(`${name}-summary`, `${name}-summary-model`)
+		: (options.planner ?? deterministicPlanner());
 	const extension: ExtensionFactory = (pi) => {
 		pi.registerProvider(faux.provider);
 		pi.registerProvider(summary.provider);
 		pi.on("session_before_compact", (event) => {
 			compactions.push(event.reason);
 		});
-		createDynamicCompactExtension({ config: live, planner, onReport: (report) => reports.push(report) })(pi);
+		createDynamicCompactExtension({
+			config: live,
+			planner,
+			onReport: (report) => reports.push(report),
+			configPath: () => options.configPath,
+			...(options.now ? { now: options.now } : {}),
+		})(pi);
 	};
 	const resourceLoader = new DefaultResourceLoader({
 		cwd,
@@ -152,7 +169,8 @@ async function session(options: {
 					return typeof step === "function" ? await step(context, streamOptions, state, model) : step;
 				}),
 			);
-			await agent.prompt(text, { expandPromptTemplates: false, source: "interactive" });
+			// Extension commands are recognized only with template expansion on.
+			await agent.prompt(text, { expandPromptTemplates: text.startsWith("/"), source: "interactive" });
 		},
 		dispose: async () => {
 			agent.dispose();
@@ -362,7 +380,7 @@ describe("dynamic-ai with the AI planner through Pi's model registry", () => {
 			return fauxAssistantMessage(JSON.stringify({ verdicts: [{ segment: first, ok: true, problems: [] }] }));
 		};
 		const run = await session({
-			planner: (provider: string, model: string) =>
+			plannerFactory: (provider: string, model: string) =>
 				createAiPlanner({
 					config: parseLiveCompactConfig({
 						enabled: true,
@@ -372,6 +390,7 @@ describe("dynamic-ai with the AI planner through Pi's model registry", () => {
 					}),
 				}),
 			summaryResponses: [generation, verification],
+			summaryRoutes: true,
 		});
 		try {
 			await threeTasks(run);
@@ -381,6 +400,134 @@ describe("dynamic-ai with the AI planner through Pi's model registry", () => {
 			expect(textOf(run.requests.at(-1)!)).toContain("Task A dumped a1-a4 with deterministic text; finished.");
 			expect(textOf(run.requests.at(-1)!)).not.toContain("a1 line 0000");
 			expect(validateToolPairing(run.requests.at(-1)! as AgentMessage[])).toEqual([]);
+		} finally {
+			await run.dispose();
+		}
+	});
+});
+
+describe("dynamic-ai commands and recovery at the limit", () => {
+	it("/live-compact now commits a batch that the next request already uses, then persists it", async () => {
+		const run = await session({ live: { protection: { keepRecentToolRounds: 1 } } });
+		try {
+			await run.prompt("task A", [...dumps("a", 3), fauxAssistantMessage("A done")]);
+			await run.prompt("task B", [fauxAssistantMessage("B done")]);
+			expect(run.reports.every((report) => report.outcome === "skipped")).toBe(true);
+			await run.prompt("/live-compact now", []);
+			const manual = run.reports.at(-1)!;
+			expect(manual).toMatchObject({ boundary: "command", outcome: "committed" });
+			expect(findIncompleteBatches(run.sessionManager.getBranch())).toHaveLength(1);
+
+			await run.prompt("task C", [fauxAssistantMessage("C done")]);
+			const first = run.requests.at(-1)!;
+			expect(textOf(first)).toContain("Live Compact history summary v1");
+			expect(textOf(first)).not.toContain("a1 line 0000");
+			expect(validateToolPairing(first as AgentMessage[])).toEqual([]);
+			expect(findIncompleteBatches(run.sessionManager.getBranch())).toEqual([]);
+		} finally {
+			await run.dispose();
+		}
+	});
+
+	it("retries a failed urgent cycle after the retry interval, without growth", async () => {
+		let clock = 1_000_000;
+		let calls = 0;
+		const deterministic = deterministicPlanner();
+		const flaky: Planner = async (request, ctx) => {
+			calls += 1;
+			if (calls === 1) return { selections: [], usage: { calls: 1, inputTokens: 0, outputTokens: 0 }, notes: [], failure: "generation stopped: error (429)" };
+			return deterministic(request, ctx);
+		};
+		// Urgent from 7_000 tokens on; no cooldown, so only backoff and the retry rule apply.
+		const run = await session({
+			planner: flaky,
+			now: () => clock,
+			// Backoff waits for 20% growth, which this test never reaches.
+			live: { thresholds: { startRatio: 0.3, targetRatio: 0.2, ceilingRatio: 0.35 }, maintenance: { cooldownRequests: 0, retryGrowthRatio: 0.2 } },
+		});
+		try {
+			await run.prompt("task A", [...dumps("a", 4), fauxAssistantMessage("A done")]);
+			await run.prompt("task B", [...dumps("b", 2), fauxAssistantMessage("B done")]);
+			const failed = run.reports.find((report) => report.outcome === "failed");
+			expect(failed).toBeDefined();
+			// Tiny growth keeps it in backoff...
+			await run.prompt("task C", [dump("c1", 1), fauxAssistantMessage("C done")]);
+			expect(run.reports.slice(run.reports.indexOf(failed!) + 1).some((report) => report.reason === "backoff")).toBe(true);
+			expect(calls).toBe(1);
+			// ...until the urgent retry interval has passed.
+			clock += 3 * 60_000;
+			await run.prompt("task D", [dump("d1", 1), fauxAssistantMessage("D done")]);
+			expect(calls).toBe(2);
+			expect(run.reports.some((report) => report.outcome === "committed")).toBe(true);
+		} finally {
+			await run.dispose();
+		}
+	});
+
+	it("retries at once after the summary route is changed with /live-compact model", async () => {
+		const routesSeen: string[] = [];
+		const failing: Planner = async (request) => {
+			routesSeen.push(`${request.routes?.summary.provider ?? "working"}/${request.routes?.summary.model ?? "model"}`);
+			return { selections: [], usage: { calls: 1, inputTokens: 0, outputTokens: 0 }, notes: [], failure: "generation stopped: error (429)" };
+		};
+		const run = await session({ planner: failing, live: { maintenance: { cooldownRequests: 0 } } });
+		try {
+			await threeTasks(run);
+			const before = routesSeen.length;
+			expect(before).toBeGreaterThan(0);
+			const summaryRoute = `dyn-${runs}-summary/dyn-${runs}-summary-model`;
+			await run.prompt(`/live-compact model summary ${summaryRoute}`, []);
+			await run.prompt("task D", [dump("d1", 1), fauxAssistantMessage("D done")]);
+			expect(routesSeen.length).toBe(before + 1);
+			expect(routesSeen.at(-1)).toBe(summaryRoute);
+			// An unknown model is refused and changes nothing.
+			await run.prompt("/live-compact model summary nowhere/none", []);
+			await run.prompt("task E", [dump("e1", 1), fauxAssistantMessage("E done")]);
+			expect(routesSeen.at(-1)).toBe(summaryRoute);
+		} finally {
+			await run.dispose();
+		}
+	});
+
+	it("writes a --global route that another running session uses from its next cycle", async () => {
+		const cwd = await mkdtemp(join(tmpdir(), "sol-pi-dynamic-global-"));
+		const configPath = join(cwd, "sol-pi.json");
+		await writeFile(configPath, JSON.stringify({ version: 1, observationPack: true, liveCompact: { enabled: true, strategy: "dynamic-ai" } }));
+		const seen: string[] = [];
+		const watching: Planner = async (request) => {
+			seen.push(request.routes?.summary.model ?? "working");
+			return { selections: [], usage: { calls: 1, inputTokens: 0, outputTokens: 0 }, notes: [] };
+		};
+		const writer = await session({ cwd, configPath, planner: deterministicPlanner() });
+		const other = await session({ cwd, configPath, planner: watching, live: { maintenance: { cooldownRequests: 0, retryGrowthRatio: 0 } } });
+		try {
+			const route = `dyn-${runs - 1}-summary/dyn-${runs - 1}-summary-model`;
+			await writer.prompt(`/live-compact model summary ${route} --global`, []);
+			const written = JSON.parse(await readFile(configPath, "utf8"));
+			expect(written.liveCompact.summary).toEqual({ provider: `dyn-${runs - 1}-summary`, model: `dyn-${runs - 1}-summary-model` });
+			expect(written.liveCompact.strategy).toBe("dynamic-ai");
+			await threeTasks(other);
+			expect(seen.at(-1)).toBe(`dyn-${runs - 1}-summary-model`);
+		} finally {
+			await writer.dispose();
+			await other.dispose();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("makes room for an input that would not fit, then sends it", async () => {
+		const run = await session({});
+		try {
+			await run.prompt("task A", [...dumps("a", 4), fauxAssistantMessage("A done")]);
+			await run.prompt("task B", [...dumps("b", 3), fauxAssistantMessage("B done")]);
+			const before = run.requests.length;
+			// ~9_000 tokens on top of ~11_000: over the 18_576 safe limit until history is summarized.
+			await run.prompt(`paste: ${"q".repeat(36_000)}`, [fauxAssistantMessage("got it")]);
+			expect(run.reports.some((report) => report.boundary === "input" && report.outcome === "committed")).toBe(true);
+			expect(run.requests.length).toBe(before + 1);
+			const sent = run.requests.at(-1)!;
+			expect(textOf(sent)).toContain("Live Compact history summary v1");
+			expect(validateToolPairing(sent as AgentMessage[])).toEqual([]);
 		} finally {
 			await run.dispose();
 		}
