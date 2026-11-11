@@ -23,6 +23,7 @@ import {
 	SettingsManager,
 	type AgentSession,
 	type ExtensionFactory,
+	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -382,6 +383,29 @@ describe("observation pack", () => {
 		await expect(
 			pi.tool("obs_recall").execute("recall-1", { id, offset: 0 }, undefined, undefined, fakeToolContext(sessionDir)),
 		).rejects.toMatchObject({ code: "ELOOP" });
+	});
+
+	it("rebuilds a missing archive from the branch history, as after a fork or a moved session", async () => {
+		const sessionDir = await sessionRoot();
+		const body = `forked\n${repeatPastThreshold("forked observation bytes\n")}`;
+		const message = toolResult(body, { toolCallId: "call-fork" });
+		const id = observationId(message);
+		// Live Compact mode: nothing archives on context, the card names the id, the archive is absent.
+		const pi = new FakePi();
+		createObservationPackExtension({ legacyProjection: false })(pi.asExtensionApi());
+		const entry = { type: "message", id: "e1", parentId: null, timestamp: "", message } as unknown as SessionEntry;
+		const manager = new FakeSessionManager([entry], "session-fork", sessionDir);
+
+		const result = await pi.tool("obs_recall").execute("recall-1", { id, offset: 0 }, undefined, undefined, fakeToolContext(manager));
+		const text = (result.content[0] as { text: string }).text;
+		expect(text).toContain(`[obs_recall id=${id} offset=0`);
+		expect(text).toContain("forked\nforked observation bytes\n");
+
+		// Without the raw result on the branch the id stays unknown.
+		const empty = new FakeSessionManager([], "session-empty", sessionDir);
+		await expect(
+			pi.tool("obs_recall").execute("recall-2", { id, offset: 0 }, undefined, undefined, fakeToolContext(empty)),
+		).rejects.toThrow(`Unknown observation id: ${id}`);
 	});
 
 	it("returns the exact original bytes across paged recall", async () => {

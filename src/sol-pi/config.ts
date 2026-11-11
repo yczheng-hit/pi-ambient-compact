@@ -10,6 +10,12 @@ import {
 	DEFAULT_REDUCER_MODEL,
 	DEFAULT_REDUCER_PROVIDER,
 } from "./extensions/evidence-preserving-reducer/config.ts";
+import {
+	checkLiveCompactCombination,
+	DEFAULT_LIVE_COMPACT_CONFIG,
+	type LiveCompactConfig,
+	parseLiveCompactConfig,
+} from "./live-compact-config.mjs";
 
 export const DEFAULT_CACHE_WRITE_READ_RATIO = 12.5;
 
@@ -22,6 +28,8 @@ export interface SolPiConfig {
 	readonly evidencePreservingReducerProvider: string;
 	readonly onlineContextCompact: boolean;
 	readonly cacheWriteReadRatio: number;
+	/** High-retention context mode; see docs/live-compact-config-plan.md. Disabled by default. */
+	readonly liveCompact: LiveCompactConfig;
 }
 
 export const DEFAULT_CONFIG: SolPiConfig = Object.freeze({
@@ -33,6 +41,7 @@ export const DEFAULT_CONFIG: SolPiConfig = Object.freeze({
 	evidencePreservingReducerProvider: DEFAULT_REDUCER_PROVIDER,
 	onlineContextCompact: false,
 	cacheWriteReadRatio: DEFAULT_CACHE_WRITE_READ_RATIO,
+	liveCompact: DEFAULT_LIVE_COMPACT_CONFIG,
 });
 
 const FEATURE_KEYS = [
@@ -42,7 +51,7 @@ const FEATURE_KEYS = [
 	"onlineContextCompact",
 ] as const;
 const STRING_KEYS = ["evidencePreservingReducerModel", "evidencePreservingReducerProvider"] as const;
-const CONFIG_KEYS = new Set<string>(["version", ...FEATURE_KEYS, ...STRING_KEYS, "cacheWriteReadRatio"]);
+const CONFIG_KEYS = new Set<string>(["version", ...FEATURE_KEYS, ...STRING_KEYS, "cacheWriteReadRatio", "liveCompact"]);
 
 export function findConfigPath(
 	cwd = process.cwd(),
@@ -112,12 +121,24 @@ export function loadSolPiConfig(
 		path,
 	);
 
+	let liveCompact: LiveCompactConfig;
+	try {
+		liveCompact = parseLiveCompactConfig(record.liveCompact);
+		checkLiveCompactCombination(liveCompact, {
+			observationPack: record.observationPack === true,
+			evidencePreservingReducer: record.evidencePreservingReducer === true,
+		});
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(`SoL-Pi config ${reason}: ${path}`);
+	}
 	return Object.freeze({
 		...DEFAULT_CONFIG,
 		...record,
 		cacheWriteReadRatio,
 		evidencePreservingReducerModel,
 		evidencePreservingReducerProvider,
+		liveCompact,
 	}) as SolPiConfig;
 }
 

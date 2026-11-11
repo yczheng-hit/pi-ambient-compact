@@ -122,7 +122,11 @@ it.each([
 	}
 }, 30_000);
 
-it.each([false, true])("starts and shuts down the offline RPC CLI without a prompt (all enabled: %s)", async (allEnabled) => {
+it.each([
+	["observation only", { evidencePreservingReducer: false, onlineContextCompact: false }],
+	["all enabled", { evidencePreservingReducer: true, onlineContextCompact: true }],
+	["Live Compact", { evidencePreservingReducer: false, onlineContextCompact: true, liveCompact: { enabled: true } }],
+] as const)("starts and shuts down the offline RPC CLI without a prompt (%s)", async (_profile, profile) => {
 	const cwd = await mkdtemp(join(tmpdir(), "sol-pi-rpc-startup-"));
 	try {
 		const agentDir = join(cwd, "agent");
@@ -132,8 +136,7 @@ it.each([false, true])("starts and shuts down the offline RPC CLI without a prom
 			...DEFAULT_CONFIG,
 			actionFusion: true,
 			observationPack: true,
-			evidencePreservingReducer: allEnabled,
-			onlineContextCompact: allEnabled,
+			...profile,
 		}));
 		const running = promisify(execFile)(process.execPath, [
 			piCliPath(), "--offline", "--approve", "--no-session", "--mode", "rpc",

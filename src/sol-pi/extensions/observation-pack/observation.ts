@@ -73,11 +73,11 @@ export function isPureTextResult(message: AgentMessage): message is ToolResultMe
 	);
 }
 
-function textFromResult(message: ToolResultMessage): string {
+export function textFromResult(message: ToolResultMessage): string {
 	return (message.content as TextContent[]).map((block) => block.text).join("\n");
 }
 
-function containsReducerReceipt(text: string): boolean {
+export function containsReducerReceipt(text: string): boolean {
 	return text.split("\n").some((line) => line === EVIDENCE_REDUCER_RECEIPT_PREFIX);
 }
 
@@ -95,11 +95,15 @@ export function isObservationId(id: string): boolean {
 	return OBSERVATION_ID_PATTERN.test(id);
 }
 
-export function createObservation(message: ToolResultMessage, runtimeRoot: string): Observation | undefined {
+export function createObservation(
+	message: ToolResultMessage,
+	runtimeRoot: string,
+	thresholdBytes = THRESHOLD_BYTES,
+): Observation | undefined {
 	const text = textFromResult(message);
 	if (containsReducerReceipt(text)) return undefined;
 	const bytes = Buffer.byteLength(text, "utf8");
-	if (bytes <= THRESHOLD_BYTES) return undefined;
+	if (bytes <= thresholdBytes) return undefined;
 	if (!runtimeRoot) throw new Error("SoL-Pi runtime directory is unavailable");
 
 	const contentHash = hash(text);
@@ -155,7 +159,7 @@ export async function ensureStored(observation: Observation): Promise<void> {
 	}
 }
 
-function completeLineExcerpt(text: string, budgetBytes: number, fromEnd: boolean): string {
+export function completeLineExcerpt(text: string, budgetBytes: number, fromEnd: boolean): string {
 	const lines = text.split(/(?<=\n)/);
 	const selected: string[] = [];
 	let selectedBytes = 0;

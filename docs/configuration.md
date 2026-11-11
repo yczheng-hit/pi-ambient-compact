@@ -27,7 +27,7 @@ The project file replaces the global file. SoL-Pi does not merge them.
 }
 ```
 
-Feature keys may be omitted and then default to `false`. `cacheWriteReadRatio` may be omitted and then defaults to `12.5`; when present it must be a finite non-negative number, and `0` explicitly means that a cache write adds no cost relative to a cache read. `evidencePreservingReducerProvider` and `evidencePreservingReducerModel` may be omitted and then use the built-in reducer route; when present each must be a non-empty string. Unknown keys, unsupported versions, malformed JSON, non-boolean feature values, invalid ratios, and invalid reducer model fields stop extension loading with a direct error.
+The optional `liveCompact` object configures the experimental high-retention mode described under [Live Compact](#live-compact-experimental); it defaults to disabled. Feature keys may be omitted and then default to `false`. `cacheWriteReadRatio` may be omitted and then defaults to `12.5`; when present it must be a finite non-negative number, and `0` explicitly means that a cache write adds no cost relative to a cache read. `evidencePreservingReducerProvider` and `evidencePreservingReducerModel` may be omitted and then use the built-in reducer route; when present each must be a non-empty string. Unknown keys, unsupported versions, malformed JSON, non-boolean feature values, invalid ratios, and invalid reducer model fields stop extension loading with a direct error.
 
 For the managed all-enabled installation described in the [agent installation and configuration protocol](../agents-install.md), validate the effective file before starting Pi:
 
@@ -48,6 +48,7 @@ This preflight does not make every valid SoL-Pi configuration all-enabled. Witho
 - `evidencePreservingReducerModel`: model id used for Evidence-Preserving Reducer.
 - `onlineContextCompact`: registers `update_plan` and boundary-driven native compaction after the other SoL-Pi context transformers. On Pi 1.x, `update_plan` is declared to the model only and cannot be called from codemode scripts.
 - `cacheWriteReadRatio`: supplies the single economic decision ratio used by Online Context Compact.
+- `liveCompact.enabled`: keeps long sessions near configured context levels by condensing older large tool results under context pressure; see [Live Compact](#live-compact-experimental). When enabled, ObservationPack stops its request-count projection and Online Context Compact stops its price-driven compaction.
 
 ## Evidence-Preserving Reducer runtime inputs
 
@@ -64,6 +65,71 @@ The release entry uses these runtime inputs:
 - **Cache write/read ratio** — from `cacheWriteReadRatio` in the effective `sol-pi.json`. The value remains fixed for the session and is not recomputed when the model changes. It drives one runtime decision and is not a cost report.
 
 The configured ratio stays fixed for the loaded extension. The mechanism stores its current plan, progress summaries, request horizon, context growth, and compaction debt as versioned custom entries in Pi's session log. After a successful compaction it sends one hidden, generic message with `triggerTurn: true`, which starts a new turn and asks the assistant to continue the current plan, preserving existing step IDs when updating progress. Newly introduced completed steps are recorded as history and do not create completion boundaries. Economic compaction has a two-provider-request cooldown; context-window protection can override it. Known native refusals and incomplete-summary token-cap failures are recorded as skips, resume the task, and block plan-only compaction retries until successful non-plan tool work or new user input. If the compaction fails for any other non-cancellation reason, it sends a hidden message that tells the assistant to continue from the current plan, then reports the error. Print and JSON modes finish that continuation in the same Pi invocation, so callers do not need to resume the session or inject `Continue working`. Cancelling the compaction or exiting Pi does not schedule an automatic continuation. The mechanism creates no separate Online Context Compact files. The programmatic factory accepts an explicit retained-tail value, which overrides Pi's setting.
+
+## Live Compact (experimental)
+
+Live Compact is a high-retention mode for long sessions where retaining useful history matters more than token cost. Below the start level it changes nothing. At each completed turn it estimates the next request's input, calibrated against the provider's reported usage. When the context is over the ceiling, or the next turn's expected growth would carry it over, Live Compact condenses the oldest eligible tool results, only as many as needed to return to the target level.
+
+A condensed result becomes a card with verbatim head and tail excerpts, its size, and its SHA-256. Its `obs_recall` id returns the archived original page by page. Each result is archived before its card is written. If archiving fails, the original stays in context.
+
+Cards are written as `context_edit` session entries through Pi's public `turn_end` boundary. Pi's own compaction threshold, forks, tree navigation, and resumed sessions therefore see the same condensed context. Raw session entries are never modified. When a card's archive is missing, `obs_recall` rebuilds it from the matching raw tool result on the current branch, after checking the id and hash. This covers a fork or clone, which has a new session id and therefore a new runtime directory, and a session moved without its runtime directory.
+
+Requirements:
+
+- Pi 0.87 or newer, checked at startup. On older Pi, Live Compact is not registered: ObservationPack and Online Context Compact keep their standard behavior, and a warning says so.
+- `observationPack: true` (archive and `obs_recall`).
+- `evidencePreservingReducer: false`. The reducer shrinks tool results regardless of context pressure, so the two cannot be combined yet.
+- `onlineContextCompact` is optional. If it is enabled, `update_plan` keeps working, but price-driven compaction stays off.
+
+```json
+{
+  "version": 1,
+  "observationPack": true,
+  "onlineContextCompact": true,
+  "liveCompact": {
+    "enabled": true,
+    "thresholds": { "startRatio": 0.7, "targetRatio": 0.7, "ceilingRatio": 0.8 },
+    "protection": { "keepRecentToolRounds": 3, "minFullRequests": 2 },
+    "observation": { "minBytes": 10240, "excerptTargetBytes": 8192 }
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `thresholds.startRatio` | `0.7` | Share of the model window where maintenance starts. |
+| `thresholds.targetRatio` | `0.7` | Level a reduction returns to. |
+| `thresholds.ceilingRatio` | `0.8` | Soft ceiling; a reduction starts when the context is over it or the next turn is expected to cross it. |
+| `protection.keepRecentToolRounds` | `3` | Most recent complete tool rounds kept verbatim; parallel calls from one assistant message count as one round. |
+| `protection.minFullRequests` | `2` | Assistant responses that must have seen a result in full before it may be condensed. |
+| `observation.minBytes` | `10240` | Only successful text results larger than this many UTF-8 bytes are eligible. |
+| `observation.excerptTargetBytes` | `8192` | Verbatim head and tail excerpt budget per card. |
+| `limits.maxCandidatesPerPass` | `8` | Most results condensed at one boundary. |
+| `limits.batchBudgetMs` | `50` | Cooperative time budget for one boundary's condensing. |
+| `budget.extraReserveTokens` | `0` | Extra input reserve on top of the automatic output reserve and margin. |
+
+Ratios are fractions (`0.7` is 70%) and must satisfy `0 < targetRatio <= startRatio < ceilingRatio < 1`. The safe input limit is the model window minus an output reserve (the model's `maxTokens`, at most 32,768 tokens and at most a quarter of the window), minus a 2% margin, minus `extraReserveTokens`. When Pi's auto-compaction is on, the levels must also stay under Pi's own compaction threshold, which is the window minus Pi's effective `compaction.reserveTokens` minus the same margin. Otherwise Pi's native compaction would run first, which matters for windows under about 82K tokens with Pi's default 16,384 reserve. If the configured ceiling exceeds the lower of the two limits, all levels are scaled down proportionally, and `/live-compact` says which limit applied. Right after Live Compact writes cards, Pi checks its own uncalibrated estimate instead of the provider's usage, so Live Compact keeps condensing eligible results until that estimate also fits under Pi's threshold. Unknown keys and invalid values are fatal, in both the runtime loader and `scripts/check-sol-pi-config.mjs`, which share one schema. The full schema, including the `summary`, `verification`, `background`, and remaining `limits` fields reserved for later stages, is in `docs/live-compact-config-plan.md` in the SoL-Pi repository.
+
+These results are never condensed:
+
+- user and assistant text;
+- error results;
+- results containing images or mixed content;
+- `obs_recall` output;
+- Evidence-Preserving Reducer receipts;
+- results whose tool call cannot be found;
+- results already edited.
+
+If protected content alone exceeds the ceiling, Live Compact keeps it verbatim and records the shortfall. It does not cut into protected content.
+
+Current limits of this build:
+
+- No per-request admission check. A single very large paste or tool batch is not intercepted before it is sent.
+- No bounded prefix summaries. When local condensing cannot keep the context below Pi's own compaction threshold, Pi's native compaction still runs, and Live Compact shows a warning.
+- `summary` and `verification` routes are validated but not used yet.
+- `background.enabled: true` is rejected.
+
+`/live-compact` shows the current levels, the context before and after the last boundary, condensed counts, calibration, and any shortfall. Decisions are logged without tool content to `live-compact/ledger.jsonl` under SoL-Pi's session-derived runtime directory. Configuration is read at extension startup; restart Pi after changing it. Condensed cards already in the session keep their content, and new settings apply to later decisions.
 
 ## Pi integration
 

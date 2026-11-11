@@ -5,6 +5,8 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+// Shared with the runtime loader (plain JavaScript, so it also runs from an installed package).
+import { checkLiveCompactCombination, parseLiveCompactConfig } from "../src/sol-pi/live-compact-config.mjs";
 
 const FEATURE_KEYS = [
 	"actionFusion",
@@ -16,7 +18,7 @@ const DEFAULT_CACHE_WRITE_READ_RATIO = 12.5;
 const DEFAULT_EPR_REDUCER_PROVIDER = ["openai", "codex"].join("-");
 const DEFAULT_EPR_REDUCER_MODEL = ["gpt-5.6", "luna"].join("-");
 const STRING_KEYS = ["evidencePreservingReducerModel", "evidencePreservingReducerProvider"];
-const CONFIG_KEYS = new Set(["version", ...FEATURE_KEYS, ...STRING_KEYS, "cacheWriteReadRatio"]);
+const CONFIG_KEYS = new Set(["version", ...FEATURE_KEYS, ...STRING_KEYS, "cacheWriteReadRatio", "liveCompact"]);
 
 function fail(message) {
 	throw new Error(message);
@@ -96,6 +98,14 @@ function validateConfig(value, requireAllEnabled) {
 		DEFAULT_EPR_REDUCER_PROVIDER,
 	);
 
+	let liveCompact;
+	try {
+		liveCompact = parseLiveCompactConfig(value.liveCompact);
+		checkLiveCompactCombination(liveCompact, effective);
+	} catch (error) {
+		fail(error instanceof Error ? error.message : String(error));
+	}
+	effective.liveCompact = liveCompact;
 	return {
 		ok: true,
 		all_enabled: FEATURE_KEYS.every((key) => effective[key] === true),

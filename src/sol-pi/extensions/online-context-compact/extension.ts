@@ -55,6 +55,11 @@ export const COMPACTION_FAILED_RESUME_REMINDER =
 export type OnlineContextCompactOptions = {
 	readonly cacheWriteReadRatio?: number | null;
 	readonly keepRecentTokens?: number;
+	/**
+	 * Stop the run at completed plan steps when compaction pays off (default true). Live Compact
+	 * turns this off: it manages context pressure itself and must not trigger a deep native summary.
+	 */
+	readonly economicCompaction?: boolean;
 };
 
 type PendingBoundary = { readonly toolCallId: string };
@@ -297,7 +302,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			if (event.toolResults.some((item) => item.toolName !== "update_plan" && !item.isError)) compactionRefused = false;
 			const boundary = pendingBoundary;
 			pendingBoundary = undefined;
-			if (!boundary || selected || compactionRefused) return;
+			if (!boundary || selected || compactionRefused || options.economicCompaction === false) return;
 			const toolResult = event.toolResults.find((item) => item.toolCallId === boundary.toolCallId);
 			if (
 				event.message.role !== "assistant" ||

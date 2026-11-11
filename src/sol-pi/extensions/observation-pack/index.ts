@@ -55,7 +55,40 @@ const RECALL_LIMITS = {
 	maxLines: RECALL_MAX_LINES - RECALL_HEADER_LINES,
 };
 
-export function createObservationPackExtension(): ExtensionFactory {
+export interface ObservationPackOptions {
+	/**
+	 * Replace large tool results in the `context` projection after FULL_SENDS requests (default).
+	 * Live Compact turns this off and decides replacements itself from context pressure. With it
+	 * off this extension neither replaces nor archives; Live Compact archives each result (through
+	 * `createObservation` and `ensureStored`) before it emits a card naming its id, so `obs_recall`
+	 * keeps working.
+	 */
+	readonly legacyProjection?: boolean;
+}
+
+function isMissing(error: unknown): boolean {
+	return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+/**
+ * Re-archive observation `id` from the raw tool result on the current branch.
+ * The id covers tool name, call id, and content hash, so a match is the same
+ * payload; `ensureStored` verifies any existing object byte for byte.
+ */
+async function rebuildFromBranch(ctx: ExtensionContext, root: string, id: string): Promise<boolean> {
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+		const message = entry.message;
+		if (!Array.isArray(message.content) || !isPureTextResult(message)) continue;
+		const observation = createObservation(message, root, 0);
+		if (observation?.id !== id) continue;
+		await ensureStored(observation);
+		return true;
+	}
+	return false;
+}
+
+export function createObservationPackExtension(options: ObservationPackOptions = {}): ExtensionFactory {
 	return (pi: ExtensionAPI) => {
 		const sentCounts = new Map<string, number>();
 		const ledgers = new Map<string, Ledger>();
@@ -83,13 +116,18 @@ export function createObservationPackExtension(): ExtensionFactory {
 				if (!isObservationId(params.id)) throw new Error(`Unknown observation id: ${params.id}`);
 				const offset = params.offset ?? 0;
 				let chunk: RecallChunk;
+				const root = runtimeRoot(ctx);
+				const read = () => readRecallChunk(observationPath(root, params.id), offset, RECALL_LIMITS);
 				try {
-					chunk = await readRecallChunk(observationPath(runtimeRoot(ctx), params.id), offset, RECALL_LIMITS);
+					chunk = await read();
 				} catch (error) {
-					if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+					if (!isMissing(error)) throw error;
+					// A fork, clone, or moved session carries cards whose archive lives under another
+					// session's runtime root. Rebuild the object from the unmodified branch history.
+					if (!(await rebuildFromBranch(ctx, root, params.id))) {
 						throw new Error(`Unknown observation id: ${params.id}`);
 					}
-					throw error;
+					chunk = await read();
 				}
 				const header = [
 					`[obs_recall id=${params.id} offset=${offset} next_offset=${chunk.nextOffset} eof=${chunk.eof}]`,
@@ -141,6 +179,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 			},
 		});
 
+		if (options.legacyProjection === false) return;
 		pi.on("context", async (event, ctx: ExtensionContext) => {
 			const root = runtimeRoot(ctx);
 			// How many provider requests each message has already been part of,
@@ -225,8 +264,8 @@ export {
 	THRESHOLD_BYTES,
 } from "./observation.ts";
 
-export function registerObservationPack(pi: ExtensionAPI): void {
-	createObservationPackExtension()(pi);
+export function registerObservationPack(pi: ExtensionAPI, options: ObservationPackOptions = {}): void {
+	createObservationPackExtension(options)(pi);
 }
 
 export default registerObservationPack;
