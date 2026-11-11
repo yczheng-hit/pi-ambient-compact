@@ -123,6 +123,51 @@ function restoreInactiveFusedTools(pi: ExtensionAPI, activeBefore: ReadonlySet<s
 	}
 }
 
+/** A fused tool that another extension's same-name tool shadows. */
+export interface ShadowedFusedTool {
+	readonly name: (typeof FUSED_TOOLS)[number];
+	/** The owner Pi reports for the effective tool: its source, or its path when known. */
+	readonly owner: string;
+}
+
+function declaresThenRun(parameters: unknown): boolean {
+	const properties = (parameters as { properties?: Record<string, unknown> } | undefined)?.properties;
+	return typeof properties === "object" && properties !== null && Object.hasOwn(properties, "then_run");
+}
+
+/**
+ * Fused tools whose effective definition is not Action Fusion's. Pi keeps the first registration
+ * of a tool name in extension load order, so an extension loaded earlier that registers `edit` or
+ * `write` wins even when Action Fusion registers later; its tool then has no `then_run`.
+ * Returns an empty list when Pi cannot report its tools.
+ */
+export function findShadowedFusedTools(pi: ExtensionAPI): ShadowedFusedTool[] {
+	const getAllTools = (pi as Partial<Pick<ExtensionAPI, "getAllTools">>).getAllTools;
+	if (typeof getAllTools !== "function") return [];
+	let tools: ReturnType<ExtensionAPI["getAllTools"]>;
+	try {
+		tools = getAllTools.call(pi);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(tools)) return [];
+	return FUSED_TOOLS.flatMap((name) => {
+		const tool = tools.find((candidate) => candidate?.name === name);
+		if (!tool || declaresThenRun(tool.parameters)) return [];
+		const source = tool.sourceInfo;
+		return [{ name, owner: source?.path || source?.source || "another extension" }];
+	});
+}
+
+function shadowedNotice(shadowed: readonly ShadowedFusedTool[]): string {
+	const parts = shadowed.map((tool) => `${tool.name} is provided by ${tool.owner}`);
+	return (
+		`SoL-Pi Action Fusion: ${parts.join("; ")}, so then_run is unavailable for ` +
+		`${shadowed.map((tool) => tool.name).join(" and ")}. ` +
+		"Load SoL-Pi before that extension to use Action Fusion, or set actionFusion: false in sol-pi.json."
+	);
+}
+
 export function createActionFusionExtension(options: ActionFusionOptions = {}): ExtensionFactory {
 	const baseEdit = memoizeByCwd((cwd: string) => createEditToolDefinition(cwd, options.editOptions));
 	const baseWrite = memoizeByCwd((cwd: string) => createWriteToolDefinition(cwd, options.writeOptions));
@@ -213,6 +258,21 @@ export function createActionFusionExtension(options: ActionFusionOptions = {}): 
 		});
 
 		if (activeBefore) restoreInactiveFusedTools(pi, activeBefore);
+
+		// Check ownership once every extension has finished starting: some register their own
+		// write after session_start, so the first prompt is the earliest reliable point.
+		// Minimal test doubles provide only registerTool.
+		if (typeof (pi as Partial<Pick<ExtensionAPI, "on">>).on !== "function") return;
+		let ownershipChecked = false;
+		pi.on("before_agent_start", (_event, ctx) => {
+			if (ownershipChecked) return;
+			ownershipChecked = true;
+			const shadowed = findShadowedFusedTools(pi);
+			if (shadowed.length === 0) return;
+			const notice = shadowedNotice(shadowed);
+			if (ctx.hasUI) ctx.ui.notify(notice, "warning");
+			else console.error(`[sol-pi] ${notice}`);
+		});
 	};
 }
 

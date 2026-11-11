@@ -19,11 +19,13 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { describe, expect, it } from "vitest";
+import { createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/sol-pi/config.ts";
-import { createActionFusionExtension } from "../src/sol-pi/extensions/action-fusion/index.ts";
+import { createActionFusionExtension, findShadowedFusedTools } from "../src/sol-pi/extensions/action-fusion/index.ts";
 import { createSolPiExtension } from "../src/sol-pi/index.ts";
-import { FakePi } from "./helpers.ts";
+import { FakePi, fakeContext } from "./helpers.ts";
 
 function hasThenRun(tool: { parameters?: unknown } | undefined): boolean {
 	return JSON.stringify(tool?.parameters ?? {}).includes("then_run");
@@ -97,6 +99,126 @@ describe("Action Fusion tool activation", () => {
 		createActionFusionExtension()(loading.asExtensionApi());
 		expect(loading.setCalls).toEqual([]);
 		expect((loading.tool("edit") as { defaultActive?: boolean }).defaultActive).toBeUndefined();
+	});
+});
+
+describe("Action Fusion ownership notice", () => {
+	/** A FakePi whose getAllTools reports `owners` for edit/write, as Pi's registry would. */
+	function piWithOwners(owners: Record<string, "fused" | { source: string; path?: string }>): FakePi {
+		const pi = new FakePi();
+		(pi as unknown as { getAllTools: () => unknown[] }).getAllTools = () =>
+			Object.entries(owners).map(([name, owner]) =>
+				owner === "fused"
+					? pi.registeredTools.find((tool) => tool.name === name)
+					: {
+							name,
+							parameters: { type: "object", properties: { path: { type: "string" } } },
+							sourceInfo: { source: owner.source, path: owner.path ?? "" },
+						},
+			);
+		return pi;
+	}
+
+	function uiContext(notices: Array<[string, string]>) {
+		return fakeContext("/tmp", {
+			hasUI: true,
+			ui: { notify: (message: string, level: string) => notices.push([message, level]) },
+		} as never);
+	}
+
+	it("warns once, at the first prompt, which extension shadows a fused tool", async () => {
+		const pi = piWithOwners({ edit: "fused", write: { source: "npm:pi-cc-extensions@1.0.16", path: "/x/pi-cc/index.ts" } });
+		createActionFusionExtension()(pi.asExtensionApi());
+		expect(findShadowedFusedTools(pi.asExtensionApi())).toEqual([{ name: "write", owner: "/x/pi-cc/index.ts" }]);
+
+		const notices: Array<[string, string]> = [];
+		await pi.emit("before_agent_start", { type: "before_agent_start" }, uiContext(notices));
+		await pi.emit("before_agent_start", { type: "before_agent_start" }, uiContext(notices));
+		expect(notices).toHaveLength(1);
+		expect(notices[0]![1]).toBe("warning");
+		expect(notices[0]![0]).toContain("write is provided by /x/pi-cc/index.ts");
+		expect(notices[0]![0]).toContain("actionFusion: false");
+		expect(notices[0]![0]).not.toContain("edit is provided");
+	});
+
+	it("stays silent when Action Fusion owns both tools, or when Pi cannot report tools", async () => {
+		const owned = piWithOwners({ edit: "fused", write: "fused" });
+		createActionFusionExtension()(owned.asExtensionApi());
+		const minimal = new FakePi();
+		createActionFusionExtension()(minimal.asExtensionApi());
+		const notices: Array<[string, string]> = [];
+		for (const pi of [owned, minimal]) await pi.emit("before_agent_start", { type: "before_agent_start" }, uiContext(notices));
+		expect(notices).toEqual([]);
+		expect(findShadowedFusedTools(minimal.asExtensionApi())).toEqual([]);
+	});
+
+	it("writes the notice to stderr without a UI", async () => {
+		const pi = piWithOwners({ edit: { source: "local" }, write: { source: "local" } });
+		createActionFusionExtension()(pi.asExtensionApi());
+		const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		try {
+			await pi.emit("before_agent_start", { type: "before_agent_start" }, fakeContext("/tmp"));
+			expect(error).toHaveBeenCalledTimes(1);
+			expect(String(error.mock.calls[0]![0])).toMatch(/edit is provided by local; write is provided by local/u);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("reports an earlier-loaded extension's write in a Pi AgentSession", async () => {
+		const cwd = await mkdtemp(join(tmpdir(), "sol-pi-af-owner-"));
+		const agentDir = join(cwd, "agent");
+		await mkdir(agentDir);
+		const faux = fauxProvider({
+			provider: "af-owner",
+			api: "af-owner-api",
+			models: [{ id: "af-owner-model", contextWindow: 100_000, maxTokens: 1_000 }],
+		});
+		faux.setResponses([fauxAssistantMessage("done")]);
+		// Loaded before SoL-Pi and registering its own write, like pi-cc-extensions' rich-diff write.
+		const otherWrite: ExtensionFactory = (pi) => {
+			pi.registerProvider(faux.provider);
+			pi.registerTool({ ...createWriteToolDefinition(cwd) });
+		};
+		const settingsManager = SettingsManager.inMemory({ retry: { enabled: false } });
+		const resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			settingsManager,
+			extensionFactories: [
+				{ name: "other-write", factory: otherWrite },
+				{ name: "sol-pi", factory: createSolPiExtension(() => ({ ...DEFAULT_CONFIG, actionFusion: true })) },
+			],
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			systemPrompt: "Action Fusion ownership test.",
+		});
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: faux.getModel(),
+			resourceLoader,
+			sessionManager: SessionManager.inMemory(cwd),
+			settingsManager,
+		});
+		const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		try {
+			// A binding makes Pi emit session_start, where SoL-Pi registers Action Fusion.
+			await session.bindExtensions({ onError: () => undefined });
+			await session.prompt("hello", { expandPromptTemplates: false, source: "interactive" });
+			const notices = error.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("Action Fusion"));
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("write is provided by");
+			expect(notices[0]).not.toContain("edit is provided");
+		} finally {
+			error.mockRestore();
+			session.dispose();
+			await rm(cwd, { recursive: true, force: true });
+		}
 	});
 });
 
