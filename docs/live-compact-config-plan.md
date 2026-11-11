@@ -2,6 +2,8 @@
 
 状态：schema 已在 fork 的 `main` 分支实现，位于 `src/sol-pi/live-compact-config.mjs`，运行时与 CLI 共用，并有一致性测试。本文是 [总方案](live-compact-plan.md) 的配置参考；修改配置解析器、CLI preflight、配置示例或相关测试前先读本文。
 
+> 后续 `dynamic-ai` 策略的新增字段和迁移语义见 [动态压缩改动方案 §8](live-compact-dynamic-plan.md#8-配置和兼容迁移)。本文保留当前 local-tools 实现及早期预留配置；不要将新提案示例写入正在运行的 `sol-pi.json`。
+
 各字段当前的生效情况：
 
 - 已生效：`enabled`、`thresholds`、`protection`、`observation`、`limits.batchBudgetMs`、`limits.maxCandidatesPerPass`、`budget`。
