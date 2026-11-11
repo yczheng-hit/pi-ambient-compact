@@ -58,6 +58,9 @@ const ACCEPTED: Array<[string, unknown]> = [
 	["zero values", { enabled: true, limits: { maxRegenerations: 0 }, background: { foregroundWaitMs: 0 }, budget: { extraReserveTokens: 0 } }],
 	["protection", { enabled: true, protection: { keepRecentToolRounds: 5, minFullRequests: 1 } }],
 	["observation", { enabled: true, observation: { minBytes: 4096, excerptTargetBytes: 16_384 } }],
+	["dynamic strategy", { enabled: true, strategy: "dynamic-ai" }],
+	["dynamic with routes", { enabled: true, strategy: "dynamic-ai", summary: { provider: "nvidia-inference", model: "nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017" } }],
+	["maintenance", { enabled: true, strategy: "dynamic-ai", maintenance: { minSavingsRatio: 0, cooldownRequests: 0, retryGrowthRatio: 0.2, maxCallsPerCycle: 2, timeoutMs: 60_000 } }],
 ];
 
 const REJECTED: Array<[string, unknown, RegExp]> = [
@@ -83,12 +86,18 @@ const REJECTED: Array<[string, unknown, RegExp]> = [
 	["wait above job timeout", { background: { jobTimeoutMs: 10_000, foregroundWaitMs: 20_000 } }, /must not exceed/u],
 	["background not implemented", { background: { enabled: true } }, /not supported by this SoL-Pi build yet/u],
 	["negative reserve", { budget: { extraReserveTokens: -1 } }, /extraReserveTokens/u],
+	["unknown strategy", { strategy: "ai" }, /liveCompact\.strategy must be one of/u],
+	["non-string strategy", { strategy: 1 }, /liveCompact\.strategy must be one of/u],
+	["savings of one", { maintenance: { minSavingsRatio: 1 } }, /minSavingsRatio must be a finite number from 0/u],
+	["one call per cycle", { maintenance: { maxCallsPerCycle: 1 } }, /maxCallsPerCycle must be an integer from 2 to 8/u],
+	["unknown maintenance field", { maintenance: { everyMs: 5 } }, /Unknown key: liveCompact\.maintenance\.everyMs/u],
 ];
 
 describe("Live Compact configuration", () => {
 	it("defaults to disabled with the documented values", () => {
 		expect(DEFAULT_LIVE_COMPACT_CONFIG).toEqual({
 			enabled: false,
+			strategy: "local-tools",
 			thresholds: { startRatio: 0.7, targetRatio: 0.7, ceilingRatio: 0.8 },
 			protection: { keepRecentToolRounds: 3, minFullRequests: 2 },
 			observation: { minBytes: 10_240, excerptTargetBytes: 8_192 },
@@ -97,8 +106,18 @@ describe("Live Compact configuration", () => {
 			background: { enabled: false, maxConcurrentJobs: 1, jobTimeoutMs: 300_000, foregroundWaitMs: 15_000 },
 			limits: { maxRegenerations: 1, batchBudgetMs: 50, maxCandidatesPerPass: 8 },
 			budget: { extraReserveTokens: 0 },
+			maintenance: { minSavingsRatio: 0.1, cooldownRequests: 12, retryGrowthRatio: 0.05, maxCallsPerCycle: 4, timeoutMs: 300_000 },
 		});
 		expect(Object.isFrozen(DEFAULT_LIVE_COMPACT_CONFIG.thresholds)).toBe(true);
+	});
+
+	it("gives dynamic-ai a 0.5 default target and keeps an explicit one", () => {
+		expect(parseLiveCompactConfig({ strategy: "dynamic-ai" }).thresholds).toEqual({ startRatio: 0.7, targetRatio: 0.5, ceilingRatio: 0.8 });
+		expect(parseLiveCompactConfig({ strategy: "dynamic-ai", thresholds: { targetRatio: 0.7 } }).thresholds.targetRatio).toBe(0.7);
+		// The default target never exceeds a lower configured start.
+		expect(parseLiveCompactConfig({ strategy: "dynamic-ai", thresholds: { startRatio: 0.4, ceilingRatio: 0.6 } }).thresholds.targetRatio).toBe(0.4);
+		// local-tools keeps its 0.7 default.
+		expect(parseLiveCompactConfig({ enabled: true }).thresholds.targetRatio).toBe(0.7);
 	});
 
 	it("merges partial groups with defaults and trims route strings", () => {

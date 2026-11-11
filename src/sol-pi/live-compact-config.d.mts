@@ -17,8 +17,14 @@ export interface LiveCompactCallConfig extends LiveCompactModelRoute {
 	readonly timeoutMs: number;
 }
 
+/** `local-tools`: P1 tool-result condensing. `dynamic-ai`: global AI maintenance (docs/live-compact-dynamic-plan.md). */
+export type LiveCompactStrategy = "local-tools" | "dynamic-ai";
+
+export declare const LIVE_COMPACT_STRATEGIES: readonly LiveCompactStrategy[];
+export declare const DYNAMIC_DEFAULT_TARGET_RATIO: number;
 export interface LiveCompactConfig {
 	readonly enabled: boolean;
+	readonly strategy: LiveCompactStrategy;
 	readonly thresholds: {
 		readonly startRatio: number;
 		readonly targetRatio: number;
@@ -47,6 +53,19 @@ export interface LiveCompactConfig {
 	};
 	readonly budget: {
 		readonly extraReserveTokens: number;
+	};
+	/** dynamic-ai only: when a maintenance cycle may call the models. */
+	readonly maintenance: {
+		/** Least reclaim worth a normal cycle, as a share of the context window. */
+		readonly minSavingsRatio: number;
+		/** Real work requests between attempts. */
+		readonly cooldownRequests: number;
+		/** After a failed or unprofitable attempt, the growth (share of the window) needed before retrying. */
+		readonly retryGrowthRatio: number;
+		/** Model calls per cycle: generation and verification, including regenerations. */
+		readonly maxCallsPerCycle: number;
+		/** Total time for one cycle's model calls, including retries. */
+		readonly timeoutMs: number;
 	};
 }
 

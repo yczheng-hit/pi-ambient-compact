@@ -126,6 +126,7 @@ it.each([
 	["observation only", { evidencePreservingReducer: false, onlineContextCompact: false }],
 	["all enabled", { evidencePreservingReducer: true, onlineContextCompact: true }],
 	["Live Compact", { evidencePreservingReducer: false, onlineContextCompact: true, liveCompact: { enabled: true } }],
+	["Live Compact dynamic-ai", { evidencePreservingReducer: false, onlineContextCompact: true, liveCompact: { enabled: true, strategy: "dynamic-ai" } }],
 ] as const)("starts and shuts down the offline RPC CLI without a prompt (%s)", async (_profile, profile) => {
 	const cwd = await mkdtemp(join(tmpdir(), "sol-pi-rpc-startup-"));
 	try {

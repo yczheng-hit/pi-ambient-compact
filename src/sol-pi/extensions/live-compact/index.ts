@@ -50,7 +50,9 @@ import {
 	pressureLevels,
 	requestInputTokens,
 } from "./budget.ts";
+import { createAiPlanner } from "./ai-planner.ts";
 import { liveCard } from "./card.ts";
+import { createDynamicCompactExtension } from "./dynamic.ts";
 import { scanCandidates } from "./policy.ts";
 
 export const LIVE_COMPACT_STATUS_KEY = "sol-pi-live-compact";
@@ -369,5 +371,9 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 }
 
 export function registerLiveCompact(pi: ExtensionAPI, config: LiveCompactConfig): void {
+	if (config.strategy === "dynamic-ai") {
+		createDynamicCompactExtension({ config, planner: createAiPlanner({ config }) })(pi);
+		return;
+	}
 	createLiveCompactExtension({ config })(pi);
 }

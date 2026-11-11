@@ -37,6 +37,8 @@ export interface BatchBegin {
 	readonly v: typeof BATCH_FORMAT_VERSION;
 	readonly batchId: string;
 	readonly edits: readonly PlannedEdit[];
+	/** Caller data kept with the batch, for example which archive holds which entries. */
+	readonly meta?: unknown;
 }
 
 export interface BatchEnd {
@@ -84,8 +86,8 @@ function editDraft(edit: PlannedEdit): ContextEditEntryDraft {
 }
 
 /** Boundary drafts for one batch: begin marker, the edits in the given order, end marker. */
-export function batchDrafts(batchId: string, orderedEdits: readonly PlannedEdit[]): SessionBoundaryDraft[] {
-	const begin: BatchBegin = { v: BATCH_FORMAT_VERSION, batchId, edits: orderedEdits };
+export function batchDrafts(batchId: string, orderedEdits: readonly PlannedEdit[], meta?: unknown): SessionBoundaryDraft[] {
+	const begin: BatchBegin = { v: BATCH_FORMAT_VERSION, batchId, edits: orderedEdits, ...(meta === undefined ? {} : { meta }) };
 	const end: BatchEnd = { v: BATCH_FORMAT_VERSION, batchId, count: orderedEdits.length };
 	return [
 		{ type: "custom", customType: BATCH_BEGIN, data: begin },

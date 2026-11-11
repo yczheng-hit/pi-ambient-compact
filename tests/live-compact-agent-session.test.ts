@@ -356,6 +356,19 @@ describe("Live Compact feature wiring", () => {
 		);
 	});
 
+	it("registers the dynamic-ai strategy's recall tool and boundaries", () => {
+		const base = { ...DEFAULT_CONFIG, observationPack: true, onlineContextCompact: true };
+		const dynamic = register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true, strategy: "dynamic-ai" }) });
+		expect(dynamic.tools).toContain("context_recall");
+		expect(dynamic.commands).toContain("live-compact");
+		for (const event of ["turn_end", "agent_before_settle", "context", "input", "session_before_compact", "model_select"]) {
+			expect(dynamic.events).toContain(event);
+		}
+		const local = register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true }) });
+		expect(local.tools).not.toContain("context_recall");
+		expect(local.events).not.toContain("agent_before_settle");
+	});
+
 	it("disables ObservationPack's legacy projection and registers Live Compact only when enabled", () => {
 		const base = { ...DEFAULT_CONFIG, observationPack: true, onlineContextCompact: true };
 		const legacy = register(base);

@@ -89,6 +89,17 @@ The new mechanism lives in `src/sol-pi/extensions/live-compact/`:
 - **Preflight.** `scripts/check-sol-pi-config.mjs` validates `liveCompact` and accepts `--require-live-compact`. The new `sol-pi.live-compact.example.json` gives a ready Live Compact profile.
 - **Tests.** Two existing tests depended on the environment and were fixed: one on the checkout path, one on Pi 1.5's renderer theme. New tests cover the config schema, the pure policy, real Pi `AgentSession` runs, and a real CLI startup.
 
+**dynamic-ai strategy (new, experimental, opt-in)**
+
+With `"strategy": "dynamic-ai"`, Live Compact runs global maintenance cycles instead of condensing single tool results:
+
+- **When.** A cycle starts once the context reaches the start level and passes the cooldown, backoff, and minimum-savings checks.
+- **What it summarizes.** It indexes whole earlier episodes and runs of complete tool rounds, and keeps user turns, errors, the most recent rounds, and the latest answer verbatim.
+- **Who summarizes.** A summary model (the working model by default, or a configured route such as a DeepSeek flash model) chooses segments and writes summaries; a verification model checks each summary against its original.
+- **How it commits.** Edits are committed as one crash-safe batch, and the originals stay readable with `context_recall`.
+
+Safety does not depend on the AI. A mid-run request above the safe input limit pauses the run, an input that cannot fit is rejected, Pi's own threshold compaction is cancelled only while the request fits, and an interrupted batch is completed before the next request. The verification stage G0 pinned the Pi behavior this relies on in real sessions. Comparisons on real providers (G4) are still pending, so `local-tools` remains the default.
+
 Live Compact does not do these yet:
 
 - **Admission check before each request.** A single very large paste or tool batch is not intercepted before it is sent.

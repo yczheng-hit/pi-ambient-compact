@@ -13,8 +13,13 @@
  * See docs/live-compact-config-plan.md for field semantics.
  */
 const MAX_TIMEOUT_MS = 1_800_000;
+/** Strategies: the P1 tool-result condensing, or the global AI maintenance of docs/live-compact-dynamic-plan.md. */
+export const LIVE_COMPACT_STRATEGIES = Object.freeze(["local-tools", "dynamic-ai"]);
+/** dynamic-ai's default target when thresholds.targetRatio is not configured (capped at startRatio). */
+export const DYNAMIC_DEFAULT_TARGET_RATIO = 0.5;
 export const DEFAULT_LIVE_COMPACT_CONFIG = deepFreeze({
 	enabled: false,
+	strategy: "local-tools",
 	thresholds: { startRatio: 0.7, targetRatio: 0.7, ceilingRatio: 0.8 },
 	protection: { keepRecentToolRounds: 3, minFullRequests: 2 },
 	observation: { minBytes: 10_240, excerptTargetBytes: 8_192 },
@@ -23,9 +28,18 @@ export const DEFAULT_LIVE_COMPACT_CONFIG = deepFreeze({
 	background: { enabled: false, maxConcurrentJobs: 1, jobTimeoutMs: 300_000, foregroundWaitMs: 15_000 },
 	limits: { maxRegenerations: 1, batchBudgetMs: 50, maxCandidatesPerPass: 8 },
 	budget: { extraReserveTokens: 0 },
+	maintenance: {
+		minSavingsRatio: 0.1,
+		cooldownRequests: 12,
+		retryGrowthRatio: 0.05,
+		maxCallsPerCycle: 4,
+		timeoutMs: 300_000,
+	},
 });
 const bool = { kind: "boolean" };
 const ratio = { kind: "ratio" };
+/** A share of the context window in [0, 1). */
+const fraction = { kind: "fraction" };
 const int = (min, max) => ({ kind: "integer", min, max });
 const callShape = {
 	provider: { kind: "routePart" },
@@ -54,6 +68,13 @@ const GROUPS = {
 		maxCandidatesPerPass: int(1, 100),
 	},
 	budget: { extraReserveTokens: int(0, Number.MAX_SAFE_INTEGER) },
+	maintenance: {
+		minSavingsRatio: fraction,
+		cooldownRequests: int(0, 1_000),
+		retryGrowthRatio: fraction,
+		maxCallsPerCycle: int(2, 8),
+		timeoutMs: int(1_000, MAX_TIMEOUT_MS),
+	},
 };
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -67,6 +88,11 @@ function checkField(path, field, value) {
 		case "ratio":
 			if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
 				throw new Error(`${path} must be a finite number between 0 and 1 (exclusive); 0.7 means 70%`);
+			}
+			return value;
+		case "fraction":
+			if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value >= 1) {
+				throw new Error(`${path} must be a finite number from 0 (inclusive) to 1 (exclusive); 0.1 means 10% of the window`);
 			}
 			return value;
 		case "integer":
@@ -101,10 +127,14 @@ export function parseLiveCompactConfig(value) {
 		throw new Error("liveCompact must be a JSON object");
 	const result = {};
 	for (const key of Object.keys(value)) {
-		if (key !== "enabled" && !Object.hasOwn(GROUPS, key))
+		if (key !== "enabled" && key !== "strategy" && !Object.hasOwn(GROUPS, key))
 			throw new Error(`Unknown key: liveCompact.${key}`);
 	}
 	result.enabled = value.enabled === undefined ? false : checkField("liveCompact.enabled", bool, value.enabled);
+	if (value.strategy !== undefined && !LIVE_COMPACT_STRATEGIES.includes(value.strategy)) {
+		throw new Error(`liveCompact.strategy must be one of ${LIVE_COMPACT_STRATEGIES.map((name) => `"${name}"`).join(", ")}`);
+	}
+	result.strategy = value.strategy ?? "local-tools";
 	for (const [group, shape] of Object.entries(GROUPS)) {
 		const defaults = DEFAULT_LIVE_COMPACT_CONFIG[group];
 		const configured = value[group];
@@ -125,6 +155,10 @@ export function parseLiveCompactConfig(value) {
 		result[group] = parsed;
 	}
 	const config = result;
+	// Defaults follow the strategy; an explicitly configured target is always kept.
+	if (config.strategy === "dynamic-ai" && !(isRecord(value.thresholds) && Object.hasOwn(value.thresholds, "targetRatio"))) {
+		config.thresholds = { ...config.thresholds, targetRatio: Math.min(DYNAMIC_DEFAULT_TARGET_RATIO, config.thresholds.startRatio) };
+	}
 	const { startRatio, targetRatio, ceilingRatio } = config.thresholds;
 	if (!(targetRatio <= startRatio && startRatio < ceilingRatio)) {
 		throw new Error("liveCompact.thresholds must satisfy 0 < targetRatio <= startRatio < ceilingRatio < 1 " +

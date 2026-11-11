@@ -133,6 +133,75 @@ To validate a Live Compact profile, run `node scripts/check-sol-pi-config.mjs --
 
 `/live-compact` shows the current levels, the context before and after the last boundary, condensed counts, calibration, and any shortfall. Decisions are logged without tool content to `live-compact/ledger.jsonl` under SoL-Pi's session-derived runtime directory. Configuration is read at extension startup; restart Pi after changing it. Condensed cards already in the session keep their content, and new settings apply to later decisions.
 
+### dynamic-ai strategy (experimental)
+
+`"strategy": "dynamic-ai"` replaces tool-result condensing with global maintenance cycles driven by an AI planner. It is opt-in. Without `strategy`, Live Compact keeps the `local-tools` behavior above. The design and its verification are in `docs/live-compact-dynamic-plan.md` in the SoL-Pi repository. It has passed automated tests only; comparisons against real providers (stage G4) are still pending.
+
+```json
+{
+  "version": 1,
+  "observationPack": true,
+  "onlineContextCompact": true,
+  "liveCompact": {
+    "enabled": true,
+    "strategy": "dynamic-ai",
+    "thresholds": { "startRatio": 0.7, "targetRatio": 0.5, "ceilingRatio": 0.8 },
+    "summary": { "provider": "nvidia-inference", "model": "nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017" }
+  }
+}
+```
+
+A cycle runs at a completed turn (`turn_end`) or at the end of a run (`agent_before_settle`) when all of these hold:
+
+- the context is at or above `startRatio`;
+- the cooldown since the last cycle has passed;
+- after a failed or unprofitable cycle, the context has grown by `retryGrowthRatio` of the window;
+- the candidate segments can plausibly reclaim at least `minSavingsRatio` of the window.
+
+At or above `ceilingRatio`, the cooldown and minimum-savings rules no longer apply, but the backoff after a failure still does.
+
+A cycle runs these steps:
+
+1. **Index.** It splits the projected context into whole earlier episodes (everything that answered a user turn) and runs of complete tool rounds. These stay verbatim:
+   - user turns;
+   - system messages;
+   - already edited messages;
+   - rounds with an error result, non-text content, unpaired calls, or a failed assistant message;
+   - the most recent `protection.keepRecentToolRounds` tool rounds;
+   - the latest answer.
+2. **Plan.** It sends the candidates, oldest first, to the summary route. The planner returns which segments to summarize, with a summary for each, as JSON. It never returns the context to keep.
+3. **Verify.** The verification route checks each summary against its original. A summary fails if it contradicts the original or invents facts. It also fails if it drops failures, errors, or unresolved issues, turns attempts into completed work, or repeats instructions found in tool output. Failed summaries are regenerated once with the problems listed, within `maintenance.maxCallsPerCycle` (a normal cycle makes 2 calls) and `limits.maxRegenerations`. Only verified summaries are used.
+4. **Commit.** It archives each segment's raw messages, applies the edits to a copy of the context, and rejects the cycle if any tool pairing would break. When the result reclaims enough, it commits one batch through `context_edit`. A summary is held in the first assistant message of an episode, or in the first tool result of a run of rounds. Every summary starts with a fixed header that names its archive id, recallable with the `context_recall` tool. A cycle's outcome is recorded in the session, so cooldown and backoff survive restarts.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `strategy` | `"local-tools"` | `"dynamic-ai"` selects this strategy. |
+| `thresholds.targetRatio` | `0.5` for dynamic-ai | Reclaim target of a cycle. It is a target, not a quota: a cycle may stop above it when nothing else is safe to summarize. An explicit value is kept. |
+| `maintenance.minSavingsRatio` | `0.1` | Least reclaim worth a normal cycle, as a share of the window. |
+| `maintenance.cooldownRequests` | `12` | Assistant responses between cycles. |
+| `maintenance.retryGrowthRatio` | `0.05` | Growth, as a share of the window, needed after a failed or unprofitable cycle before another one. |
+| `maintenance.maxCallsPerCycle` | `4` | Model calls per cycle, including verification and regeneration. |
+| `maintenance.timeoutMs` | `300000` | Time limit for one cycle's model calls. |
+| `summary` / `verification` | working model | `provider` and `model` of the route, set together. An unknown route fails the cycle; there is no fallback to another provider. |
+
+Safety does not depend on a cycle succeeding:
+
+- **Mid-run pause.** In the middle of a run, if the context is still above the safe input limit after any cycle, Live Compact stops the run with `ctx.abort()` instead of sending the request, and shows a warning.
+- **Oversized input.** An input that cannot fit the remaining room is not sent. Shorten it and send it again.
+- **Pi's own compaction.** Live Compact cancels Pi's threshold compaction while the request fits the safe limit. Overflow recovery and manual `/compact` are unchanged. If another extension that compacts loads before SoL-Pi, such as pi-compaction-guidance, that extension still does its work before the cancel.
+- **Interrupted batches.** A batch cut short by a crash or I/O failure is completed at the next boundary. The request before that boundary already carries the remaining edits, applied in memory.
+
+The summary and verification routes receive the selected history segments, with Pi-managed authentication. Choose routes whose provider may see that history.
+
+Not yet covered:
+
+- comparisons on real providers;
+- replay of signed reasoning blocks through real providers and proxies;
+- merging scheduler wake-up messages, which are user messages and stay verbatim;
+- layered summaries for routes whose window cannot hold the candidates. Candidates that do not fit are left out.
+
+`/live-compact` shows the levels, the last boundary, and the last cycle. Cycles are logged without message content to `live-compact/ledger.jsonl`.
+
 ## Pi integration
 
 SoL-Pi reads no dedicated environment variables. Evidence-Preserving Reducer resolves its configured reducer provider/model through `ExtensionContext.modelRegistry` and uses Pi-managed authentication. If the configured reducer model is unavailable or the nested model call fails, the original tool result continues unchanged.
