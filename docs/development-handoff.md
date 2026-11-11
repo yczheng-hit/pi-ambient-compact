@@ -40,6 +40,8 @@ git remote -v
 - P0：Phase 1 检出验证。开发依赖升级为 Pi 1.5.2，确认了事件顺序与公开边界 API。
 - P1：`extensions/live-compact/`、共享配置 schema、`/live-compact` 状态命令，以及单元测试、AgentSession 测试和真实 CLI 启动测试。
 
+- 文档：README 新增“Changes in this fork”与 Live Compact 安装配置说明；`agents-install.md` 新增 `live-compact` 配置方案（版本门槛、`--require-live-compact` preflight、通过 RPC `get_commands` 确认已注册）；新增 `sol-pi.live-compact.example.json`。
+
 记录见总方案 §2.3 与 §13；分支上 `npm run check`、`npm audit --audit-level=high`、`check-pi-compat --strict`、all-mechanisms 均通过。
 
 未完成：

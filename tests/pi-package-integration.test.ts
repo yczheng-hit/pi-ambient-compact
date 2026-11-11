@@ -147,7 +147,9 @@ it.each([
 			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
 			timeout: 20_000,
 		});
-		running.child.stdin?.end(`${JSON.stringify({ id: "startup", type: "get_state" })}\n`);
+		running.child.stdin?.end(
+			`${JSON.stringify({ id: "startup", type: "get_state" })}\n${JSON.stringify({ id: "commands", type: "get_commands" })}\n`,
+		);
 		const { stdout, stderr } = await running;
 		const records = stdout.trim().split("\n").map((line) => JSON.parse(line));
 		expect(records.find((record) => record.id === "startup")).toMatchObject({
@@ -155,6 +157,9 @@ it.each([
 		});
 		expect(stderr).not.toMatch(/error|failed/iu);
 		expect(records.some((record) => record.type === "agent_start")).toBe(false);
+		// The protocol's Live Compact check: the /live-compact command is registered only in that profile.
+		const commands = records.find((record) => record.id === "commands")?.data?.commands as Array<{ name: string }>;
+		expect(commands.some((command) => command.name === "live-compact")).toBe("liveCompact" in profile);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

@@ -16,7 +16,8 @@
 		"CONTRIBUTING.md",
 		"SECURITY.md",
 		"THIRD_PARTY_NOTICES.md",
-		"sol-pi.example.json"
+		"sol-pi.example.json",
+		"sol-pi.live-compact.example.json"
 	],
 	"scripts": {
 		"test": "vitest run",

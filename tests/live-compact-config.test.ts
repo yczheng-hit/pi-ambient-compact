@@ -7,7 +7,7 @@
  * runtime loader and the CLI preflight on the same fixtures.
  */
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -147,6 +147,33 @@ describe("Live Compact configuration", () => {
 		const value = { version: 1, evidencePreservingReducer: true, liveCompact: { enabled: false } };
 		expect(runtime(value).ok).toBe(true);
 		expect(cli(value).ok).toBe(true);
+	});
+
+	it("checks the Live Compact profile with --require-live-compact", () => {
+		const example = join(process.cwd(), "sol-pi.live-compact.example.json");
+		const passing = spawnSync(process.execPath, [SCRIPT, "--config", example, "--require-live-compact"], { encoding: "utf8" });
+		expect(passing.status).toBe(0);
+		expect(JSON.parse(passing.stdout)).toMatchObject({ ok: true, live_compact_enabled: true, all_enabled: false });
+
+		const disabled = writeConfig({ ...BASE, liveCompact: { enabled: false } });
+		const failing = spawnSync(process.execPath, [SCRIPT, "--config", disabled, "--require-live-compact"], { encoding: "utf8" });
+		expect(failing.status).toBe(1);
+		expect(failing.stderr).toMatch(/liveCompact\.enabled must be true/u);
+
+		const both = spawnSync(
+			process.execPath,
+			[SCRIPT, "--config", example, "--require-live-compact", "--require-all-enabled"],
+			{ encoding: "utf8" },
+		);
+		expect(both.status).toBe(1);
+		expect(both.stderr).toMatch(/select different profiles/u);
+	});
+
+	it("ships example configurations that pass the runtime loader", () => {
+		for (const name of ["sol-pi.example.json", "sol-pi.live-compact.example.json"]) {
+			const value = JSON.parse(readFileSync(join(process.cwd(), name), "utf8"));
+			expect(runtime(value).ok).toBe(true);
+		}
 	});
 
 	it("runs the preflight from an installed package under node_modules", () => {

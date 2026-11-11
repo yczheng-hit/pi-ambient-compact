@@ -17,6 +17,9 @@
 >
 > SoL-Pi is under active development to support pi-v1 and the latest model checkpoints.
 
+> [!IMPORTANT]
+> **This fork ([yczheng-hit/SoL-Pi](https://github.com/yczheng-hit/SoL-Pi)) adds Live Compact**, an experimental, opt-in high-retention context mode, on the `feat/local-context-policy` branch. Upstream [NVlabs/SoL-Pi](https://github.com/NVlabs/SoL-Pi) does not include it. See [Changes in this fork](#changes-in-this-fork) and [Live Compact](#live-compact-experimental).
+
 ## 📰 News
 
 - **2026-10-14** — Released the [SoL-Pi Skill](examples/sol-pi-skill/README.md) example: use SoL-Pi as a skill from Claude Code (`/sol-pi`) or Codex (`$sol-pi`). The current task is handed to SoL-Pi with the host conversation as context, runs in the background, and its result is reported back to the session.
@@ -46,6 +49,7 @@ The standalone release contains four mechanisms that survived that process. They
 | Observations | **ObservationPack** | Repeated large text results become stable handles with exact paged recall. |
 | Delegation | **Evidence-Preserving Reducer** | Long diagnostic logs become compact receipts only when every retained quotation matches the archived source. |
 | Context | **Online Context Compact** | Completed plan steps become candidate points for Pi's native compaction, subject to economic and window-pressure checks; after a successful compaction, Pi continues the task in a new turn. |
+| Context (experimental, this fork) | **Live Compact** | Long sessions stay near configured context levels (default 70–80% of the window): only as many older large tool results as needed become verbatim head/tail cards with exact recall, instead of a deep native summary. |
 
 The mechanisms share four rules:
 
@@ -53,6 +57,43 @@ The mechanisms share four rules:
 - **Explicit opt-in.** A missing configuration leaves every mechanism disabled.
 - **Preserve evidence.** Original observations remain available locally, and reducer failures leave the original result unchanged.
 - **Use Pi's runtime choices.** Authentication, provider URLs, and the main model remain under Pi's control.
+
+## Changes in this fork
+
+The upstream base is `2195680` (NVlabs/SoL-Pi `main`). Every change is on the `feat/local-context-policy` branch. With `liveCompact` absent or disabled, every upstream mechanism behaves as before.
+
+**Live Compact (new, experimental, opt-in)**
+
+The new mechanism lives in `src/sol-pi/extensions/live-compact/`:
+
+- **Pressure-driven condensing.** Nothing happens below the start level. At each completed turn, Live Compact estimates the next request's input, calibrated against provider usage. When the context is over the ceiling, or the next turn would carry it over, the oldest eligible tool results are condensed until the context is back at the target.
+- **Persisted through Pi's public boundary.** Cards are `context_edit` session entries written at Pi's `turn_end` boundary, which needs Pi 0.87 or newer. Pi's own compaction threshold, forks, tree navigation, and resumed sessions see the same condensed context, and raw entries are never modified.
+- **Recall.** The original is archived before its card is written. `obs_recall` returns the original page by page; when the archive is missing, as after a fork or a moved session, it rebuilds the original from the branch history.
+- **Protection.** These stay verbatim:
+  - the most recent complete tool rounds (default 3);
+  - user and assistant text;
+  - error results;
+  - results with images or mixed content;
+  - recall output;
+  - reducer receipts;
+  - results whose tool call cannot be found.
+- **Safe levels.** The levels stay under both the safe input limit and Pi's own compaction threshold, so Pi's deep native compaction does not run first.
+- **Configuration.** Levels, protection, and excerpt sizes are set in `liveCompact` in `sol-pi.json`. The runtime loader and the CLI preflight share one schema, in `src/sol-pi/live-compact-config.mjs`. `/live-compact` shows the current state.
+
+**Other changes**
+
+- **Pi version.** The development dependency moved from Pi 1.3.0 to Pi 1.5.2, because Pi 1.3.0 pins `undici` 8.10.2, which has a high-severity advisory. Pi 1.5.2 joins the tested set and is the documented install default.
+- **Existing mechanisms.** ObservationPack gained a `legacyProjection` option, and Online Context Compact gained an `economicCompaction` option. Live Compact switches both off: ObservationPack then only archives and serves `obs_recall`, and Online Context Compact stops price-driven compaction. On Pi older than 0.87, Live Compact is not registered and both keep their standard behavior.
+- **Preflight.** `scripts/check-sol-pi-config.mjs` validates `liveCompact` and accepts `--require-live-compact`. The new `sol-pi.live-compact.example.json` gives a ready Live Compact profile.
+- **Tests.** Two existing tests depended on the environment and were fixed: one on the checkout path, one on Pi 1.5's renderer theme. New tests cover the config schema, the pure policy, real Pi `AgentSession` runs, and a real CLI startup.
+
+Live Compact does not do these yet:
+
+- **Admission check before each request.** A single very large paste or tool batch is not intercepted before it is sent.
+- **Bounded prefix summaries.** When condensing tool results is not enough, Pi's native compaction still runs, with a warning.
+- **Background summaries.**
+
+The design and the status of each stage are in [docs/live-compact-plan.md](docs/live-compact-plan.md), and the configuration spec is in [docs/live-compact-config-plan.md](docs/live-compact-config-plan.md).
 
 ## Technical Details and Core Insights
 
@@ -78,7 +119,7 @@ Install the latest tested Pi release:
 npm install --global @earendil-works/pi-coding-agent@1.5.2
 ```
 
-Pi 0.84.2 remains supported and tested; install `@earendil-works/pi-coding-agent@0.84.2` instead to stay on it.
+Pi 0.84.2 remains supported and tested; install `@earendil-works/pi-coding-agent@0.84.2` instead to stay on it. Live Compact needs Pi 0.87 or newer, and 1.5.2 is the tested version.
 
 Then install SoL-Pi directly from [NVlabs/SoL-Pi](https://github.com/NVlabs/SoL-Pi):
 
@@ -118,6 +159,36 @@ Enable additional mechanisms only after reviewing their configuration and securi
 
 For the complete schema, see [Configuration](docs/configuration.md). Coding agents and automated environments should follow the canonical [agent installation and configuration protocol](agents-install.md), which describes an all-enabled configuration checked with `scripts/check-sol-pi-config.mjs --require-all-enabled`.
 
+### Live Compact (experimental)
+
+Live Compact is only in this fork, and its branch has not been pushed yet. Install it from a local checkout of the `feat/local-context-policy` branch:
+
+```bash
+git -C /absolute/path/to/SoL-Pi switch feat/local-context-policy
+pi install /absolute/path/to/SoL-Pi            # user-wide
+# or, from the target project:
+pi install /absolute/path/to/SoL-Pi --local --approve
+```
+
+Once the branch is pushed, `pi install git:github.com/yczheng-hit/SoL-Pi@feat/local-context-policy` installs the same code.
+
+Configure it by copying [`sol-pi.live-compact.example.json`](sol-pi.live-compact.example.json) to the effective `sol-pi.json`. Then validate the file and confirm that Pi registers the mechanism, without sending a prompt:
+
+```bash
+node scripts/check-sol-pi-config.mjs --config /absolute/path/to/effective/sol-pi.json --require-live-compact
+printf '{"id":"commands","type":"get_commands"}\n' | pi --offline --approve --no-session --mode rpc
+```
+
+The second command must list `live-compact`. Restart Pi after changing the file. In a session, `/live-compact` shows the levels, the context before and after the last boundary, and any shortfall.
+
+These rules apply:
+
+- Live Compact requires `observationPack: true` and `evidencePreservingReducer: false`.
+- It is therefore a different profile from the all-enabled installation.
+- Thresholds are fractions of the model window; `0.7` means 70%.
+
+Coding agents should follow the `live-compact` profile of the [agent installation and configuration protocol](agents-install.md). Every field and the current limits are described in [Live Compact](docs/configuration.md#live-compact-experimental).
+
 ### Pi 1.x and codemode
 
 SoL-Pi is tested with Pi 0.84.2, 1.0.4, 1.3.0, and 1.5.2. All four mechanisms work with Pi codemode in both `codemode.mode: "on"` and `"only"`. In `"only"` mode, the model reaches bash, edit, and write through codemode scripts, and Evidence-Preserving Reducer skips script calls, so it has no effect there. See [Codemode](docs/compatibility.md#codemode) for per-mechanism behavior.
@@ -139,7 +210,7 @@ ObservationPack and Evidence-Preserving Reducer store session-specific archives 
 └── evidence-preserving-reducer/
 ```
 
-They archive eligible source material in this directory. The archived copies remain local and are not automatically deleted when the Pi session ends.
+They archive eligible source material in this directory. The archived copies remain local and are not automatically deleted when the Pi session ends. Live Compact keeps its originals in `observation-pack/`. It also writes a decision log without tool content to `live-compact/ledger.jsonl` in the same directory.
 
 With `pi --no-session` or `SessionManager.inMemory()`, Pi provides no session directory. SoL-Pi instead creates a private directory named `sol-pi-<session-id>-<random>/` under the operating system's temporary directory. ObservationPack and Evidence-Preserving Reducer share this directory for the lifetime of the loaded extension. These modes disable Pi's session-log persistence; SoL-Pi still writes archive files for exact recall. Temporary archives are also retained after the session or worker exits so callers can read referenced evidence. Their eventual cleanup follows the host's temporary-file policy or the caller's cleanup, and they are not guaranteed to survive system cleanup or support session recovery.
 
@@ -154,7 +225,10 @@ Evidence-Preserving Reducer may send eligible diagnostic-log content to its conf
 | [Configuration](docs/configuration.md) | Config search order, schema, defaults, and trust behavior |
 | [Compatibility](docs/compatibility.md) | Supported Pi APIs and standalone integration details |
 | [Security](SECURITY.md) | Local storage, remote reduction, and sensitive behavior |
-| [Agent installation](agents-install.md) | Reproducible installation and all-enabled validation procedure |
+| [Agent installation](agents-install.md) | Reproducible installation and validation procedure for the `all-enabled` and `live-compact` profiles |
+| [Live Compact plan](docs/live-compact-plan.md) | Live Compact design, Pi event-order findings, staged plan, and implementation record |
+| [Live Compact configuration spec](docs/live-compact-config-plan.md) | Full `liveCompact` schema, including fields reserved for later stages |
+| [Development handoff](docs/development-handoff.md) | Status and next steps for continuing this fork |
 
 ## Development
 

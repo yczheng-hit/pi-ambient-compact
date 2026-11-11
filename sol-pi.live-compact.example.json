@@ -1,0 +1,14 @@
+{
+	"version": 1,
+	"actionFusion": true,
+	"observationPack": true,
+	"evidencePreservingReducer": false,
+	"onlineContextCompact": true,
+	"cacheWriteReadRatio": 12.5,
+	"liveCompact": {
+		"enabled": true,
+		"thresholds": { "startRatio": 0.7, "targetRatio": 0.7, "ceilingRatio": 0.8 },
+		"protection": { "keepRecentToolRounds": 3, "minFullRequests": 2 },
+		"observation": { "minBytes": 10240, "excerptTargetBytes": 8192 }
+	}
+}

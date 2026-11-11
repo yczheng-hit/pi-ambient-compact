@@ -25,7 +25,7 @@ function fail(message) {
 }
 
 function parseArguments(argv) {
-	const options = { config: undefined, requireAllEnabled: false };
+	const options = { config: undefined, requireAllEnabled: false, requireLiveCompact: false };
 	const seen = new Set();
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index];
@@ -33,6 +33,11 @@ function parseArguments(argv) {
 		if (argument === "--require-all-enabled") {
 			seen.add(argument);
 			options.requireAllEnabled = true;
+			continue;
+		}
+		if (argument === "--require-live-compact") {
+			seen.add(argument);
+			options.requireLiveCompact = true;
 			continue;
 		}
 		if (argument !== "--config") fail(`unknown option: ${argument}`);
@@ -43,6 +48,10 @@ function parseArguments(argv) {
 		index += 1;
 	}
 	if (!options.config) fail("--config is required");
+	// The all-enabled profile turns on the Evidence-Preserving Reducer, which Live Compact excludes.
+	if (options.requireAllEnabled && options.requireLiveCompact) {
+		fail("--require-all-enabled and --require-live-compact select different profiles; use one");
+	}
 	return options;
 }
 
@@ -60,7 +69,7 @@ function readConfig(path) {
 	}
 }
 
-function validateConfig(value, requireAllEnabled) {
+function validateConfig(value, requireAllEnabled, requireLiveCompact) {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		fail("config must be a JSON object");
 	}
@@ -106,9 +115,11 @@ function validateConfig(value, requireAllEnabled) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
 	effective.liveCompact = liveCompact;
+	if (requireLiveCompact && !liveCompact.enabled) fail("liveCompact.enabled must be true");
 	return {
 		ok: true,
 		all_enabled: FEATURE_KEYS.every((key) => effective[key] === true),
+		live_compact_enabled: liveCompact.enabled,
 		effective_config: effective,
 	};
 }
@@ -122,7 +133,7 @@ function stringConfigValue(value, key, defaultValue) {
 try {
 	const options = parseArguments(process.argv.slice(2));
 	const configPath = resolve(options.config);
-	const result = validateConfig(readConfig(configPath), options.requireAllEnabled);
+	const result = validateConfig(readConfig(configPath), options.requireAllEnabled, options.requireLiveCompact);
 	console.log(JSON.stringify({ ...result, config: configPath }, null, 2));
 } catch (error) {
 	console.error(`SoL-Pi configuration preflight failed: ${error instanceof Error ? error.message : String(error)}`);

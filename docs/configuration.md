@@ -129,6 +129,8 @@ Current limits of this build:
 - `summary` and `verification` routes are validated but not used yet.
 - `background.enabled: true` is rejected.
 
+To validate a Live Compact profile, run `node scripts/check-sol-pi-config.mjs --config <file> --require-live-compact`. It fails unless `liveCompact.enabled` is `true`, and it cannot be combined with `--require-all-enabled`. [`sol-pi.live-compact.example.json`](../sol-pi.live-compact.example.json) is a ready profile.
+
 `/live-compact` shows the current levels, the context before and after the last boundary, condensed counts, calibration, and any shortfall. Decisions are logged without tool content to `live-compact/ledger.jsonl` under SoL-Pi's session-derived runtime directory. Configuration is read at extension startup; restart Pi after changing it. Condensed cards already in the session keep their content, and new settings apply to later decisions.
 
 ## Pi integration
