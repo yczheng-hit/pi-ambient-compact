@@ -82,6 +82,47 @@ function showsSavingsBanner(thenRun: unknown, context: { readonly isError?: bool
 	return Boolean(thenRun) && !context.isError;
 }
 
+/** The tools Action Fusion replaces. */
+const FUSED_TOOLS = ["edit", "write"] as const;
+
+/**
+ * Pi's active tool names, or `undefined` when they cannot be read: minimal test
+ * doubles have no `getActiveTools`, and Pi rejects the call while it is still
+ * loading extensions.
+ */
+function readActiveTools(pi: ExtensionAPI): string[] | undefined {
+	const getActiveTools = (pi as Partial<Pick<ExtensionAPI, "getActiveTools">>).getActiveTools;
+	if (typeof getActiveTools !== "function") return undefined;
+	try {
+		const names = getActiveTools.call(pi);
+		return Array.isArray(names) ? names : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Restore the inactive state of fused tools that another extension had turned off before Action
+ * Fusion registered its replacements. Re-registering a tool refreshes Pi's tool registry, and
+ * while a tool allowlist is set (`--tools`) that refresh activates every allowed tool, whatever
+ * `defaultActive` says. Tools that were active stay active.
+ */
+function restoreInactiveFusedTools(pi: ExtensionAPI, activeBefore: ReadonlySet<string>): void {
+	const after = readActiveTools(pi);
+	const setActiveTools = (pi as Partial<Pick<ExtensionAPI, "setActiveTools">>).setActiveTools;
+	if (!after || typeof setActiveTools !== "function") return;
+	const reactivated = new Set<string>(FUSED_TOOLS.filter((name) => !activeBefore.has(name) && after.includes(name)));
+	if (reactivated.size === 0) return;
+	try {
+		setActiveTools.call(
+			pi,
+			after.filter((name) => !reactivated.has(name)),
+		);
+	} catch {
+		// Leave Pi's state alone when it refuses the update.
+	}
+}
+
 export function createActionFusionExtension(options: ActionFusionOptions = {}): ExtensionFactory {
 	const baseEdit = memoizeByCwd((cwd: string) => createEditToolDefinition(cwd, options.editOptions));
 	const baseWrite = memoizeByCwd((cwd: string) => createWriteToolDefinition(cwd, options.writeOptions));
@@ -99,8 +140,17 @@ export function createActionFusionExtension(options: ActionFusionOptions = {}): 
 			then_run: createThenRunSchema(WRITE_THEN_RUN_DESCRIPTION),
 		});
 
+		// Another extension may have turned edit or write off before this runs, for example
+		// pi-hashline-edit-pro (anchored edit tools) or pi-openai-codex-compat (apply_patch). Keep
+		// that state: registering a replacement must never re-activate a disabled tool.
+		const activeNames = readActiveTools(pi);
+		const activeBefore = activeNames ? new Set(activeNames) : undefined;
+		const keepInactive = (name: (typeof FUSED_TOOLS)[number]) =>
+			activeBefore && !activeBefore.has(name) ? { defaultActive: false } : {};
+
 		pi.registerTool<typeof editParameters, EditToolDetails | undefined>({
 			...editTemplate,
+			...keepInactive("edit"),
 			parameters: editParameters,
 			async execute(toolCallId, input, signal, onUpdate, ctx) {
 				const { then_run, ...editInput } = input as typeof input & { then_run?: ThenRunInput };
@@ -132,6 +182,7 @@ export function createActionFusionExtension(options: ActionFusionOptions = {}): 
 
 		pi.registerTool<typeof writeParameters, undefined>({
 			...writeTemplate,
+			...keepInactive("write"),
 			parameters: writeParameters,
 			async execute(toolCallId, input, signal, onUpdate, ctx) {
 				const { then_run, ...writeInput } = input as typeof input & { then_run?: ThenRunInput };
@@ -160,6 +211,8 @@ export function createActionFusionExtension(options: ActionFusionOptions = {}): 
 					: base;
 			},
 		});
+
+		if (activeBefore) restoreInactiveFusedTools(pi, activeBefore);
 	};
 }
 

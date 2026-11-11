@@ -84,6 +84,7 @@ The new mechanism lives in `src/sol-pi/extensions/live-compact/`:
 
 - **Pi version.** The development dependency moved from Pi 1.3.0 to Pi 1.5.2, because Pi 1.3.0 pins `undici` 8.10.2, which has a high-severity advisory. Pi 1.5.2 joins the tested set and is the documented install default.
 - **Existing mechanisms.** ObservationPack gained a `legacyProjection` option, and Online Context Compact gained an `economicCompaction` option. Live Compact switches both off: ObservationPack then only archives and serves `obs_recall`, and Online Context Compact stops price-driven compaction. On Pi older than 0.87, Live Compact is not registered and both keep their standard behavior.
+- **Action Fusion tool activation.** Action Fusion no longer re-activates an `edit` or `write` tool that another extension turned off before it registered its replacements, for example pi-hashline-edit-pro, which uses anchored edit tools, or pi-openai-codex-compat, which uses `apply_patch`. With a tool allowlist such as `--tools`, re-registering a tool used to activate it again. Tools that were active still get `then_run`.
 - **Preflight.** `scripts/check-sol-pi-config.mjs` validates `liveCompact` and accepts `--require-live-compact`. The new `sol-pi.live-compact.example.json` gives a ready Live Compact profile.
 - **Tests.** Two existing tests depended on the environment and were fixed: one on the checkout path, one on Pi 1.5's renderer theme. New tests cover the config schema, the pure policy, real Pi `AgentSession` runs, and a real CLI startup.
 
