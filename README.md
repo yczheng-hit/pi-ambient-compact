@@ -176,7 +176,7 @@
      ```
 3. **克隆与本地校验（Phase 1）**：
    ```bash
-   git clone https://github.com/yczheng-hit/SoL-Pi.git pi-ambient-compact
+   git clone https://github.com/yczheng-hit/pi-ambient-compact.git pi-ambient-compact
    cd pi-ambient-compact
    npm ci --ignore-scripts
    npm run check
@@ -189,7 +189,7 @@
    # 全局安装（推荐）
    pi install "/absolute/path/to/pi-ambient-compact" --approve
    # 或直接从 Git 安装
-   pi install git:github.com/yczheng-hit/SoL-Pi
+   pi install git:github.com/yczheng-hit/pi-ambient-compact
    pi list --approve
    ```
 5. **写入并校验配置文件（Phase 3 & Phase 4）**：
