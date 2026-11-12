@@ -54,12 +54,34 @@ export function parseRouteArgument(text: string): LiveCompactModelRoute | null |
 	return { provider: value.slice(0, slash), model: value.slice(slash + 1) };
 }
 
-function sessionOverride(branch: readonly SessionEntry[], kind: RouteKind): LiveCompactModelRoute | null | undefined {
+function sessionOverride(
+	branch: readonly SessionEntry[],
+	kind: RouteKind,
+	sessionId?: string,
+): LiveCompactModelRoute | null | undefined {
+	const settingsKey = `${kind}Route`;
 	for (let index = branch.length - 1; index >= 0; index -= 1) {
 		const entry = branch[index]!;
-		if (entry.type !== "custom" || entry.customType !== ROUTES_ENTRY) continue;
-		const data = entry.data as RoutesOverride | undefined;
-		if (data?.v === 1 && Object.hasOwn(data, kind)) return data[kind];
+		if (entry.type !== "custom") continue;
+		if (entry.customType === ROUTES_ENTRY) {
+			const data = entry.data as RoutesOverride | undefined;
+			if (data?.v === 1 && Object.hasOwn(data, kind)) return data[kind];
+		} else if (entry.customType === "sol-pi:live-compact-settings-v1") {
+			const data = entry.data as {
+				version?: number;
+				sessionId?: string;
+				changes?: Record<string, unknown>;
+			} | undefined;
+			if (data?.version !== 1 || !data.changes) continue;
+			if (sessionId !== undefined && typeof data.sessionId === "string" && data.sessionId !== sessionId) continue;
+			if (!Object.hasOwn(data.changes, settingsKey)) return undefined;
+			const change = data.changes[settingsKey];
+			if (!Array.isArray(change) || change.length === 0) return undefined;
+			const raw = change[0];
+			if (raw === null) return null;
+			if (typeof raw === "string") return parseRouteArgument(raw);
+			return undefined;
+		}
 	}
 	return undefined;
 }

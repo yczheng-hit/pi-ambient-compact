@@ -68,6 +68,8 @@ import {
 import { BATCH_BEGIN, batchDrafts, completionDrafts, findIncompleteBatches, orderPrefixSafe, type PlannedEdit } from "./commit.ts";
 import { type Planner, type PlanUsage, renderSegment, userTurns } from "./planner.ts";
 import { describeRoute, parseRouteArgument, ROUTE_KINDS, ROUTES_ENTRY, type RouteKind, RouteStore, writeGlobalRoute } from "./routes.ts";
+import { buildLiveCompactSettingFields, canOpenSettingsTui, openLiveCompactSettingsPane } from "./settings-pane.ts";
+import { LiveCompactConfigResolver } from "./settings-store.ts";
 import { indexSegments, type Segment, segmentEdits, summaryCarrierText } from "./segments.ts";
 import { validateToolPairing } from "./validator.ts";
 
@@ -211,6 +213,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		let noGain: { readonly projected: number } | undefined;
 		let running = false;
 		const routeStore = new RouteStore(config);
+		const configResolver = new LiveCompactConfigResolver(config);
 		const ledgers = new Map<string, Ledger>();
 
 		const record = async (ctx: ExtensionContext, entry: Record<string, unknown>): Promise<void> => {
@@ -238,18 +241,23 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			lastAfter = undefined;
 			noGain = undefined;
 		};
-		pi.on("session_start", reset);
+		pi.on("session_start", (_event, ctx) => {
+			reset();
+			configResolver.prime(configPathOf(ctx));
+		});
 		pi.on("session_tree", reset);
 		pi.on("session_compact", reset);
 		pi.on("model_select", reset);
 
+		const effectiveConfig = (ctx: ExtensionContext): LiveCompactConfig =>
+			configResolver.resolve(ctx, configPathOf(ctx), buildLiveCompactSettingFields(ctx)).config;
 		const routesFor = (ctx: ExtensionContext) => routeStore.effective(ctx.sessionManager.getBranch(), configPathOf(ctx));
 		const routeFingerprint = (ctx: ExtensionContext): string => {
 			const routes = routesFor(ctx);
 			return ROUTE_KINDS.map((kind) => describeRoute(routes[kind].call)).join(" | ");
 		};
 		const levelsFor = (ctx: ExtensionContext) =>
-			pressureLevels(ctx.model?.contextWindow, ctx.model?.maxTokens, config, piCompactionReserve(pi, ctx));
+			pressureLevels(ctx.model?.contextWindow, ctx.model?.maxTokens, effectiveConfig(ctx), piCompactionReserve(pi, ctx));
 
 		/** Calibrated input estimate for the next request, from a boundary preview. */
 		const measure = (event: BoundaryEvent): number => {
@@ -305,8 +313,9 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const urgent = projected >= currentLevels.ceiling;
 			const requests = requestCount(branch);
 			const state = latestState(branch);
+			const activeConfig = effectiveConfig(ctx);
 			const routes = routeFingerprint(ctx);
-			const { cooldownRequests, retryGrowthRatio, minSavingsRatio, timeoutMs } = config.maintenance;
+			const { cooldownRequests, retryGrowthRatio, minSavingsRatio, timeoutMs } = activeConfig.maintenance;
 			if (!force) {
 				if (state && !urgent && requests - state.requestCount < cooldownRequests) return skipped("cooldown");
 				const routesChanged = state?.routes !== undefined && state.routes !== routes;
@@ -318,7 +327,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			}
 
 			// Candidates, within the real-token pool limit.
-			const index = indexSegments(entries, { keepRecentToolRounds: config.protection.keepRecentToolRounds });
+			const index = indexSegments(entries, { keepRecentToolRounds: activeConfig.protection.keepRecentToolRounds });
 			const minSavings = Math.ceil(minSavingsRatio * window);
 			// An explicit or input-driven cycle reclaims at least the minimum, even below the target.
 			const goal = Math.max(0, projected - currentLevels.target, force ? minSavings : 0);
@@ -656,7 +665,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				state
 					? `last cycle: ${state.outcome} at request ${state.requestCount}, ${percent(state.projected, window)}, reclaimed ${state.reclaimed} tokens${state.note ? ` (${state.note.slice(0, 200)})` : ""}`
 					: "last cycle: none in this branch",
-				"commands: /live-compact now | /live-compact model [summary|verification <provider>/<model>|default [--global]]",
+				"commands: /live-compact [settings|status|now|model ...]",
 			];
 		};
 
@@ -681,27 +690,49 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			return `session ${kind} model: ${route ? describeRoute(route) : "cleared; global or startup setting applies"}`;
 		};
 
+		const formatNowResult = (result: CycleResult | CycleReport | string): string =>
+			typeof result === "string"
+				? result
+				: "state" in result
+					? `maintenance ${result.outcome}: ${percent(result.report.projected, result.report.levels.contextWindow)} → ${percent(result.after, result.report.levels.contextWindow)}${result.outcome === "committed" ? " (applies from the next request)" : ""}${result.report.reason !== result.outcome ? `; ${result.report.reason.slice(0, 300)}` : ""}`
+					: `maintenance skipped: ${result.reason}`;
+
 		pi.registerCommand("live-compact", {
-			description: "Live Compact (dynamic-ai): status, run maintenance now, or set the summary/verification model",
+			description: "Configure Live Compact settings, view status, or run maintenance now",
 			getArgumentCompletions: (prefix) => {
-				const options = ["status", "now", "model", "model summary ", "model verification ", "model summary default", "model verification default"];
+				const options = [
+					"settings",
+					"status",
+					"now",
+					"model",
+					"model summary ",
+					"model verification ",
+					"model summary default",
+					"model verification default",
+				];
 				return options.filter((option) => option.startsWith(prefix)).map((option) => ({ value: option, label: option }));
 			},
 			handler: async (args, ctx) => {
 				const parts = args.trim().split(/\s+/u).filter(Boolean);
 				const [command, ...rest] = parts;
 				try {
-					if (!command || command === "status") {
+					if (command === "settings" || (!command && canOpenSettingsTui(ctx))) {
+						await openLiveCompactSettingsPane(pi, ctx, {
+							startupConfig: config,
+							getCurrentConfig: effectiveConfig,
+							getSessionState: (c, fields) => configResolver.resolve(c, configPathOf(c), fields).session,
+							onChange: () => {
+								levels = levelsFor(ctx);
+							},
+							extraDetails: statusLines,
+							runNow: async (c) => formatNowResult(await runOutsideBoundary(c, "command")),
+							configPathOverride: options.configPath,
+						});
+					} else if (!command || command === "status") {
 						ctx.ui.notify(statusLines(ctx).join("\n"), "info");
 					} else if (command === "now") {
 						const result = await runOutsideBoundary(ctx, "command");
-						const text =
-							typeof result === "string"
-								? result
-								: "state" in result
-									? `maintenance ${result.outcome}: ${percent(result.report.projected, result.report.levels.contextWindow)} → ${percent(result.after, result.report.levels.contextWindow)}${result.outcome === "committed" ? " (applies from the next request)" : ""}${result.report.reason !== result.outcome ? `; ${result.report.reason.slice(0, 300)}` : ""}`
-									: `maintenance skipped: ${result.reason}`;
-						ctx.ui.notify(`Live Compact: ${text}`, "info");
+						ctx.ui.notify(`Live Compact: ${formatNowResult(result)}`, "info");
 					} else if (command === "model") {
 						ctx.ui.notify(rest.length === 0 ? routeLines(ctx).join("\n") : `Live Compact: ${setRoute(rest, ctx)}`, "info");
 					} else {

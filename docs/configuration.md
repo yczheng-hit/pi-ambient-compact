@@ -203,18 +203,32 @@ Not yet covered:
 
 Model calls are bounded. The candidate pool is capped at 150,000 real tokens, and both the pool and the route window are measured in real tokens, using the session's calibration against provider usage, so a route is never sent more than its window holds. A rate limit, overload, 5xx error, or timeout is retried twice within the cycle, after 5 and 15 seconds.
 
-**Commands.** `/live-compact` takes these subcommands:
+**Interactive TUI settings pane and commands.** In TUI mode, `/live-compact` (with no arguments) or `/live-compact settings` opens an interactive settings pane with the same interaction contract as `/codex-settings`:
+
+- **Enter** changes the selected value or opens its picker/input editor (model routes from `ctx.modelRegistry` or custom `provider/model`, water-level percentages, protection counts, maintenance cooldown/savings/timeouts, and observation sizes). It never implicitly saves.
+- **Space** activates a result or inserts a space when search has focus.
+- **Tab / Shift+Tab** move between search, results, and action controls.
+- **F1** (or **Details, errors, and save target**) opens scrollable runtime status, levels, last cycle details, setting source, and the exact save target.
+- Edits remain drafts (`*`) until explicitly applied or saved.
+- **Apply to session** applies drafts (`~`) to the current session and stores them as a session state entry without modifying configuration files.
+- **Ctrl+S** saves to `sol-pi.json` (using a `.settings-lock` file and conflict hashes) and applies changes without closing.
+- **Save and close** saves and applies changes, then closes on success. Other running Pi sessions automatically hot-reload the saved `sol-pi.json` on their next turn/cycle while preserving their own session overrides.
+- **Run maintenance now** executes a maintenance cycle directly from the menu.
+- **Escape** cancels a field editor or discards unapplied drafts and closes the menu.
+
+Subcommands remain available in both TUI and non-TUI modes:
 
 | Command | Effect |
 |---|---|
-| `/live-compact` or `/live-compact status` | Levels, the routes in effect and where each comes from, the last boundary, and the last cycle. |
+| `/live-compact` or `/live-compact settings` | Open the interactive TUI settings pane (in non-TUI mode, `/live-compact` prints status). |
+| `/live-compact status` | Levels, the routes in effect and where each comes from, the last boundary, and the last cycle. |
 | `/live-compact now` | Run a cycle immediately, without the cooldown, backoff, or minimum-savings checks. It needs no boundary: the batch applies to the next request and is persisted at the following boundary. |
 | `/live-compact model` | Show the summary and verification routes in effect. |
 | `/live-compact model summary <provider>/<model>` | Use that model for summaries in this session only. Use `verification` for the checker. The model id may contain slashes, for example `nvidia-inference/nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017`. |
 | `/live-compact model summary default` | Clear this session's override. |
 | `... --global` | Write the route, or with `default` remove it, in the effective `sol-pi.json`. The whole file is validated first and then replaced atomically; other settings and route options are kept. |
 
-A model that Pi has not registered is refused and nothing changes. For each route, a session override takes precedence over the global default in `sol-pi.json`, which takes precedence over the configuration loaded at startup. A session override is kept in the session, so it carries over to forks. The global file is re-read whenever it changes, so a `--global` change made in one session applies to every running session from its next cycle, without a restart. If the file becomes invalid, the last valid routes stay in use and `/live-compact` reports the error. Other `liveCompact` settings are still read at startup.
+A model that Pi has not registered is refused and nothing changes. For each setting, a session override takes precedence over the global/project default in `sol-pi.json`, which takes precedence over the configuration loaded at startup. The global/project file is re-read whenever its content changes on disk, so a saved change made in one session applies to every running session from its next cycle, without a restart. If the file becomes invalid, the last valid settings stay in use and `/live-compact` reports the error.
 `/live-compact` shows the levels, the last boundary, and the last cycle. Cycles are logged without message content to `live-compact/ledger.jsonl`.
 
 ## Pi integration

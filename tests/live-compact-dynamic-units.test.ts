@@ -385,3 +385,192 @@ describe("AI planner robustness", () => {
 		expect(seen).toEqual(["q/fast"]);
 	});
 });
+
+// ---------------------------------------------------------------------------------------------
+
+import { Key } from "@earendil-works/pi-tui";
+import { settingsMenu } from "../src/sol-pi/extensions/live-compact/settings-menu.ts";
+import { buildLiveCompactSettingFields } from "../src/sol-pi/extensions/live-compact/settings-pane.ts";
+import {
+	configToSettingValues,
+	LIVE_COMPACT_SESSION_SETTINGS_TYPE,
+	LiveCompactConfigResolver,
+	SettingsStore,
+	sessionSettingsEntry,
+	settingValuesToConfig,
+} from "../src/sol-pi/extensions/live-compact/settings-store.ts";
+
+describe("codex-settings style TUI settings menu & store", () => {
+	const fakeTheme = {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	};
+	const fakeKeys = {
+		matches: (data: string, id: string) => {
+			if (id === "tui.select.confirm") return data === "\r";
+			if (id === "tui.select.cancel") return data === "\u001b";
+			if (id === "tui.select.up") return data === "\u001b[A";
+			if (id === "tui.select.down") return data === "\u001b[B";
+			if (id === "tui.input.tab") return data === "\t";
+			if (id === "tui.editor.deleteCharBackward") return data === "\u007f";
+			return false;
+		},
+		getKeys: (id: string) => [id],
+	};
+
+	it("applies session settings without touching disk, saves to disk with Ctrl+S, and hot-reloads in other sessions", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "lc-settings-pane-"));
+		try {
+			const globalPath = join(dir, "sol-pi.json");
+			writeFileSync(
+				globalPath,
+				JSON.stringify(
+					{
+						version: 1,
+						actionFusion: false,
+						observationPack: true,
+						onlineContextCompact: true,
+						liveCompact: { enabled: true, strategy: "dynamic-ai" },
+					},
+					null,
+					2,
+				),
+			);
+			const startup = parseLiveCompactConfig({ enabled: true, strategy: "dynamic-ai" });
+			const store = new SettingsStore(globalPath, undefined, startup);
+			const snapshot = await store.load();
+			const fakeCtx = {
+				modelRegistry: {
+					getAvailable: () => [
+						{ provider: "nvidia-inference", id: "nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017" },
+						{ provider: "nvidia-inference", id: "gcp/google/eccn-gemini-4-argon" },
+					],
+					find: (provider: string, id: string) => provider === "nvidia-inference" && id.length > 0,
+				},
+			} as unknown as ExtensionContext;
+			const fields = buildLiveCompactSettingFields(fakeCtx);
+			const sessionEntriesA: SessionEntry[] = [];
+			const sessionEntriesB: SessionEntry[] = [];
+			const sessionState = { changes: {} };
+			let closed = false;
+			let ranNow = 0;
+
+			const factory = settingsMenu({
+				title: "Live Compact Settings",
+				store,
+				snapshot,
+				current: configToSettingValues(startup),
+				session: sessionState,
+				fields,
+				status: (values) => `strategy=${values.strategy} summary=${values.summaryRoute ?? "working"}`,
+				extraDetails: () => ["extra status line"],
+				runNow: async () => {
+					ranNow += 1;
+					return "maintenance committed: 80% → 48%";
+				},
+				prepare: async () => undefined,
+				guard: (values) => {
+					settingValuesToConfig(values, startup);
+				},
+				apply: (values, nextSession) => {
+					sessionEntriesA.push({
+						type: "custom",
+						id: `s-${sessionEntriesA.length}`,
+						parentId: null,
+						timestamp: "",
+						customType: LIVE_COMPACT_SESSION_SETTINGS_TYPE,
+						data: sessionSettingsEntry("sess-A", values, nextSession),
+					} as unknown as SessionEntry);
+				},
+			});
+
+			const comp = factory(
+				{ requestRender: () => undefined, terminal: { rows: 30 } },
+				fakeTheme as never,
+				fakeKeys as never,
+				() => {
+					closed = true;
+				},
+			);
+			comp. render(100);
+
+			// Move down to "Summary model" (second field) and press Enter to open model picker.
+			comp.handleInput!("\u001b[B");
+			comp.handleInput!("\r");
+			let rendered = comp.render(100).join("\n");
+			expect(rendered).toContain("Summary model: Working model");
+			expect(rendered).toContain("nvidia-inference/nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017");
+
+			// Move down to the DeepSeek model and select it with Enter (stages draft *).
+			comp.handleInput!("\u001b[B");
+			comp.handleInput!("\r");
+			rendered = comp.render(100).join("\n");
+			expect(rendered).toContain("1 draft change(s). Not applied.");
+			expect(rendered).toContain("nvidia-inference/nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017 *");
+
+			// Tab once from results to reach actions ("Apply to session" is selected first) and press Enter.
+			comp.handleInput!("\t");
+			comp.handleInput!("\r");
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			rendered = comp.render(100).join("\n");
+			expect(rendered).toContain("Applied to session. Configuration files unchanged.");
+			expect(rendered).toContain("nvidia-inference/nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017 ~");
+
+			// Disk file is still untouched, while Session A resolves the session override.
+			expect(JSON.parse(readFileSync(globalPath, "utf8")).liveCompact.summary).toBeUndefined();
+			const resolverA = new LiveCompactConfigResolver(startup);
+			const resolverB = new LiveCompactConfigResolver(startup);
+			const ctxA = {
+				sessionManager: {
+					getSessionId: () => "sess-A",
+					getEntries: () => sessionEntriesA,
+					getBranch: () => sessionEntriesA,
+				},
+			};
+			const ctxB = {
+				sessionManager: {
+					getSessionId: () => "sess-B",
+					getEntries: () => sessionEntriesB,
+					getBranch: () => sessionEntriesB,
+				},
+			};
+			expect(resolverA.resolve(ctxA, globalPath, fields).config.summary.model).toBe(
+				"nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017",
+			);
+			expect(resolverB.resolve(ctxB, globalPath, fields).config.summary.model).toBeUndefined();
+
+			// Press Ctrl+S to persist the session override to disk; Session B hot-reloads it on its next resolve.
+			comp.handleInput!("\x13");
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			rendered = comp.render(100).join("\n");
+			expect(rendered).toContain("Saved and applied.");
+			const savedJson = JSON.parse(readFileSync(globalPath, "utf8"));
+			expect(savedJson.actionFusion).toBe(false);
+			expect(savedJson.liveCompact.summary).toEqual({
+				provider: "nvidia-inference",
+				model: "nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017",
+			});
+			utimesSync(globalPath, new Date(), new Date(Date.now() + 5_000));
+			expect(resolverB.resolve(ctxB, globalPath, fields).config.summary.model).toBe(
+				"nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017",
+			);
+
+			// Select "Run maintenance now" from actions (index 2: down twice) and press Enter.
+			comp.handleInput!("\u001b[B");
+			comp.handleInput!("\u001b[B");
+			comp.handleInput!("\r");
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(ranNow).toBe(1);
+			expect(comp.render(100).join("\n")).toContain("maintenance committed: 80% → 48%");
+
+			// Press F1 to open details, then Escape to return, then Escape to close.
+			comp.handleInput!("\u001bOP"); // F1
+			expect(comp.render(100).join("\n")).toContain("extra status line");
+			comp.handleInput!("\u001b");
+			comp.handleInput!("\u001b");
+			expect(closed).toBe(true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

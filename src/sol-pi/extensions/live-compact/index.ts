@@ -26,14 +26,16 @@
  * Pi's native compaction still runs, and this extension says so.
  */
 import { join } from "node:path";
-import type {
-	ContextEditEntryDraft,
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionFactory,
-	SessionBoundaryDraft,
-	TurnEndEvent,
+import {
+	type ContextEditEntryDraft,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type ExtensionFactory,
+	getAgentDir,
+	type SessionBoundaryDraft,
+	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
+import { findConfigPath } from "../../config.ts";
 import type { LiveCompactConfig } from "../../live-compact-config.mjs";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { createLedger, type Ledger } from "../observation-pack/ledger.ts";
@@ -54,6 +56,8 @@ import { createAiPlanner } from "./ai-planner.ts";
 import { liveCard } from "./card.ts";
 import { createDynamicCompactExtension } from "./dynamic.ts";
 import { scanCandidates } from "./policy.ts";
+import { buildLiveCompactSettingFields, canOpenSettingsTui, openLiveCompactSettingsPane } from "./settings-pane.ts";
+import { LiveCompactConfigResolver } from "./settings-store.ts";
 
 export const LIVE_COMPACT_STATUS_KEY = "sol-pi-live-compact";
 /** First Pi release with actionable `turn_end` boundary entries (`context_edit` drafts). */
@@ -154,6 +158,10 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 		let reclaimedTotal = 0;
 		let lastShortfall = 0;
 		let nativeCompactions = 0;
+		const configResolver = new LiveCompactConfigResolver(config);
+		const configPathOf = (ctx: ExtensionContext) => findConfigPath(ctx.cwd, getAgentDir(), ctx.isProjectTrusted());
+		const effectiveConfig = (ctx: ExtensionContext): LiveCompactConfig =>
+			configResolver.resolve(ctx, configPathOf(ctx), buildLiveCompactSettingFields(ctx)).config;
 		const ledgers = new Map<string, Ledger>();
 
 		const ledgerFor = (ctx: ExtensionContext): Ledger => {
@@ -204,7 +212,10 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			lastShortfall = 0;
 		};
 
-		pi.on("session_start", resetMeasurements);
+		pi.on("session_start", (_event, ctx) => {
+			resetMeasurements();
+			configResolver.prime(configPathOf(ctx));
+		});
 		pi.on("session_tree", resetMeasurements);
 		pi.on("session_compact", resetMeasurements);
 		// Another model has another tokenizer and window: its first turn is not growth.
@@ -237,7 +248,8 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			supported = true;
 			if (event.outcome !== "completed" || ctx.signal?.aborted) return;
 
-			levels = pressureLevels(ctx.model?.contextWindow, ctx.model?.maxTokens, config, piCompactionReserve(pi, ctx));
+			const activeConfig = effectiveConfig(ctx);
+			levels = pressureLevels(ctx.model?.contextWindow, ctx.model?.maxTokens, activeConfig, piCompactionReserve(pi, ctx));
 			if (!levels) {
 				showStatus(ctx);
 				return;
@@ -274,7 +286,7 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 				let scan: ReturnType<typeof scanCandidates>;
 				let root: string;
 				try {
-					scan = scanCandidates(event.context.contextEntries, config);
+					scan = scanCandidates(event.context.contextEntries, activeConfig);
 					root = runtimeRoot(ctx);
 				} catch (error) {
 					// Fail open: an unreadable context or runtime root leaves every result verbatim.
@@ -288,12 +300,12 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 				let reclaimed = 0;
 				for (const candidate of scan.candidates) {
 					if (reclaimed >= decision.reclaimTokens && !overPiThreshold()) break;
-					if (drafts.length >= config.limits.maxCandidatesPerPass) break;
-					if (now() - started > config.limits.batchBudgetMs) break;
+					if (drafts.length >= activeConfig.limits.maxCandidatesPerPass) break;
+					if (now() - started > activeConfig.limits.batchBudgetMs) break;
 					try {
-						const observation = createObservation(candidate.message, root, config.observation.minBytes);
+						const observation = createObservation(candidate.message, root, activeConfig.observation.minBytes);
 						if (!observation) continue;
-						const card = liveCard(observation, candidate.message.toolCallId, config.observation.excerptTargetBytes);
+						const card = liveCard(observation, candidate.message.toolCallId, activeConfig.observation.excerptTargetBytes);
 						if (!card) continue;
 						const rawSaving = observation.tokens - estimateTextTokens(card);
 						const saving = Math.floor(rawSaving * ratio);
@@ -347,24 +359,50 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			return { entries: [...event.entries, ...drafts] };
 		});
 
+		const statusLines = (): string[] => {
+			const window = levels?.contextWindow;
+			return [
+				`Live Compact: ${supported === false ? "inactive (needs Pi >= 0.87)" : "enabled (local-tools)"}`,
+				levels
+					? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, ceiling ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens${levels.clamped ? (levels.inputLimit === levels.compactionLimit ? " (lowered under Pi's compaction threshold)" : " (lowered under the safe limit)") : ""}`
+					: "levels: unknown until the first completed turn with a known model window",
+				`context: ${percent(projected, window)} before, ${percent(lastAfter, window)} after the last boundary` +
+					(decision ? ` (${decision.reason})` : ""),
+				`condensed results: ${condensedTotal}; estimated tokens reclaimed: ${reclaimedTotal}`,
+				`calibration: ${calibration === undefined ? "none yet" : calibration.toFixed(2)}; growth estimate: ${growth === undefined ? "none yet" : Math.round(growth)}`,
+				...(lastShortfall > 0 ? [`last shortfall: ${lastShortfall} tokens could not be reclaimed locally`] : []),
+				...(nativeCompactions > 0 ? [`native compactions while enabled: ${nativeCompactions}`] : []),
+				"not yet available: per-request admission, bounded prefix summaries, background summaries",
+			];
+		};
+
 		pi.registerCommand("live-compact", {
-			description: "Show Live Compact context levels and activity",
-			handler: async (_args, ctx) => {
-				const window = levels?.contextWindow;
-				const lines = [
-					`Live Compact: ${supported === false ? "inactive (needs Pi >= 0.87)" : "enabled"}`,
-					levels
-						? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, ceiling ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens${levels.clamped ? (levels.inputLimit === levels.compactionLimit ? " (lowered under Pi's compaction threshold)" : " (lowered under the safe limit)") : ""}`
-						: "levels: unknown until the first completed turn with a known model window",
-					`context: ${percent(projected, window)} before, ${percent(lastAfter, window)} after the last boundary` +
-						(decision ? ` (${decision.reason})` : ""),
-					`condensed results: ${condensedTotal}; estimated tokens reclaimed: ${reclaimedTotal}`,
-					`calibration: ${calibration === undefined ? "none yet" : calibration.toFixed(2)}; growth estimate: ${growth === undefined ? "none yet" : Math.round(growth)}`,
-					...(lastShortfall > 0 ? [`last shortfall: ${lastShortfall} tokens could not be reclaimed locally`] : []),
-					...(nativeCompactions > 0 ? [`native compactions while enabled: ${nativeCompactions}`] : []),
-					"not yet available: per-request admission, bounded prefix summaries, background summaries",
-				];
-				ctx.ui.notify(lines.join("\n"), "info");
+			description: "Configure Live Compact settings or view context levels and activity",
+			getArgumentCompletions: (prefix) => {
+				const options = ["settings", "status"];
+				return options.filter((option) => option.startsWith(prefix)).map((option) => ({ value: option, label: option }));
+			},
+			handler: async (args, ctx) => {
+				const command = args.trim().split(/\s+/u)[0];
+				if (command === "settings" || (!command && canOpenSettingsTui(ctx))) {
+					await openLiveCompactSettingsPane(pi, ctx, {
+						startupConfig: config,
+						getCurrentConfig: effectiveConfig,
+						getSessionState: (c, fields) => configResolver.resolve(c, configPathOf(c), fields).session,
+						onChange: (nextConfig) => {
+							levels = pressureLevels(
+								ctx.model?.contextWindow,
+								ctx.model?.maxTokens,
+								nextConfig,
+								piCompactionReserve(pi, ctx),
+							);
+							showStatus(ctx);
+						},
+						extraDetails: () => statusLines(),
+					});
+					return;
+				}
+				ctx.ui.notify(statusLines().join("\n"), "info");
 			},
 		});
 	};
