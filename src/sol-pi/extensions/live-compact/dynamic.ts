@@ -665,7 +665,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				state
 					? `last cycle: ${state.outcome} at request ${state.requestCount}, ${percent(state.projected, window)}, reclaimed ${state.reclaimed} tokens${state.note ? ` (${state.note.slice(0, 200)})` : ""}`
 					: "last cycle: none in this branch",
-				"commands: /live-compact [settings|status|now|model ...]",
+				"commands: /ambient-compact [settings|status|now|model ...] (alias: /live-compact)",
 			];
 		};
 
@@ -697,8 +697,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					? `maintenance ${result.outcome}: ${percent(result.report.projected, result.report.levels.contextWindow)} → ${percent(result.after, result.report.levels.contextWindow)}${result.outcome === "committed" ? " (applies from the next request)" : ""}${result.report.reason !== result.outcome ? `; ${result.report.reason.slice(0, 300)}` : ""}`
 					: `maintenance skipped: ${result.reason}`;
 
-		pi.registerCommand("live-compact", {
-			description: "Configure Live Compact settings, view status, or run maintenance now",
+		const commandSpec: Parameters<ExtensionAPI["registerCommand"]>[1] = {
+			description: "Configure Ambient Compact settings, view status, or run maintenance now",
 			getArgumentCompletions: (prefix) => {
 				const options = [
 					"settings",
@@ -742,7 +742,9 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					ctx.ui.notify(`Live Compact: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}
 			},
-		});
+		};
+		pi.registerCommand("ambient-compact", commandSpec);
+		pi.registerCommand("live-compact", commandSpec);
 	};
 }
 

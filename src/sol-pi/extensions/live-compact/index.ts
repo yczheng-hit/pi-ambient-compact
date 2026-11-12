@@ -376,8 +376,8 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			];
 		};
 
-		pi.registerCommand("live-compact", {
-			description: "Configure Live Compact settings or view context levels and activity",
+		const commandSpec: Parameters<ExtensionAPI["registerCommand"]>[1] = {
+			description: "Configure Ambient Compact settings or view context levels and activity",
 			getArgumentCompletions: (prefix) => {
 				const options = ["settings", "status"];
 				return options.filter((option) => option.startsWith(prefix)).map((option) => ({ value: option, label: option }));
@@ -404,7 +404,9 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 				}
 				ctx.ui.notify(statusLines().join("\n"), "info");
 			},
-		});
+		};
+		pi.registerCommand("ambient-compact", commandSpec);
+		pi.registerCommand("live-compact", commandSpec);
 	};
 }
 

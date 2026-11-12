@@ -456,7 +456,7 @@ describe("codex-settings style TUI settings menu & store", () => {
 			let ranNow = 0;
 
 			const factory = settingsMenu({
-				title: "Live Compact Settings",
+				title: "Ambient Compact Settings",
 				store,
 				snapshot,
 				current: configToSettingValues(startup),

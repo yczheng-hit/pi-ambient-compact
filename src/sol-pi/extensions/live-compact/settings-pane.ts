@@ -104,7 +104,7 @@ export function buildLiveCompactSettingFields(ctx?: ExtensionContext): SettingsF
 			id: "startPercent",
 			label: "Start threshold",
 			description: "Context usage percentage where maintenance becomes eligible.",
-			choices: [50, 60, 65, 70, 75, 80],
+			choices: [30, 40, 50, 60, 65, 70, 75, 80],
 			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
 			format: (value) => `${value}%`,
 		},
@@ -112,7 +112,7 @@ export function buildLiveCompactSettingFields(ctx?: ExtensionContext): SettingsF
 			id: "targetPercent",
 			label: "Target level",
 			description: "Target context usage percentage after maintenance (must be ≤ start threshold).",
-			choices: [35, 40, 50, 60, 65, 70],
+			choices: [30, 35, 40, 50, 60, 65, 70],
 			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
 			format: (value) => `${value}%`,
 		},
@@ -230,7 +230,7 @@ export async function openLiveCompactSettingsPane(
 		};
 	};
 	if (!canOpenSettingsTui(ctx)) {
-		ctx.ui.notify("/live-compact settings requires TUI mode.", "error");
+		ctx.ui.notify("/ambient-compact settings requires TUI mode.", "error");
 		return;
 	}
 	try {
@@ -249,7 +249,7 @@ export async function openLiveCompactSettingsPane(
 
 		await cmdCtx.ui.custom(
 			settingsMenu({
-				title: "Live Compact Settings",
+				title: "Ambient Compact Settings",
 				store,
 				snapshot,
 				current: currentValues,

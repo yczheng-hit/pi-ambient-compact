@@ -1,8 +1,8 @@
-# SoL-Pi Agent Installation and Configuration Protocol
+# pi-ambient-compact (SoL-Pi) Agent Installation and Configuration Protocol
 
-This is the canonical procedure for Codex, Claude Code, and other coding agents that install, configure, or validate SoL-Pi from a full source checkout. Follow the phases in order. Explicit user instructions take precedence. An extracted npm package is not a substitute for the checkout because it does not contain the test suite.
+This is the canonical procedure for Codex, Claude Code, Pi, and other coding agents that install, configure, or validate `pi-ambient-compact` (built on SoL-Pi and inspired by Live Compact) from a full source checkout. Follow the phases in order. Explicit user instructions take precedence. An extracted npm package is not a substitute for the checkout because it does not contain the test suite.
 
-Installation and configuration are complete only when Pi remains unmodified, the repository checks pass, Pi lists the package, one effective `sol-pi.json` matches the selected configuration profile, and Pi starts without an extension error. With the default `all-enabled` profile, all four mechanisms are enabled. With the `live-compact` profile, Live Compact is enabled and Pi registers its `/live-compact` command.
+Installation and configuration are complete only when Pi remains unmodified, the repository checks pass, Pi lists the package, one effective `sol-pi.json` matches the selected configuration profile, and Pi starts without an extension error. With the default `all-enabled` profile, all four upstream mechanisms are enabled. With the `live-compact` profile, Ambient Compact (`liveCompact`, supporting `dynamic-ai` and `local-tools` strategies) is enabled and Pi registers its `/ambient-compact` (and alias `/live-compact`) command.
 
 ## Rules
 
@@ -141,7 +141,7 @@ The rules for this profile:
 - `observationPack` must be `true`, and `evidencePreservingReducer` must be `false`.
 - `actionFusion` and `onlineContextCompact` are optional. With Live Compact on, Online Context Compact keeps `update_plan` but does not run price-driven compaction.
 - Change a `liveCompact` value only when the user asks for it. Ratios are fractions, so `0.7` means 70%, and they must satisfy `0 < targetRatio <= startRatio < ceilingRatio < 1`.
-- The `summary`, `verification`, and `background` groups are validated but not used yet, and `background.enabled: true` is rejected.
+- Set `"strategy": "dynamic-ai"` (recommended for 30%–70% golden-band global AI selective compaction with `targetRatio: 0.5`) or `"strategy": "local-tools"` (default when omitted). In `dynamic-ai`, `summary` and `verification` accept optional `{ "provider": "<provider>", "model": "<model-id>" }` routes (defaulting to the working model when omitted), and `maintenance` controls `minSavingsRatio`, `cooldownRequests`, `retryGrowthRatio`, `maxCallsPerCycle`, and `timeoutMs`. `background.enabled: true` remains rejected.
 
 See [Live Compact](docs/configuration.md#live-compact-experimental) for every field and the current limits.
 
@@ -193,7 +193,7 @@ Require exit status 0 and `"live_compact_enabled": true` in the output. The chec
    printf '{"id":"commands","type":"get_commands"}\n' | pi --offline --approve --no-session --mode rpc
    ```
 
-   Require a response with `"id":"commands"` whose `data.commands` includes `live-compact`, and no extension error on stderr. If the command is missing, Pi is older than 0.87 or the configuration did not enable Live Compact.
+   Require a response with `"id":"commands"` whose `data.commands` includes `ambient-compact` (and alias `live-compact`), and no extension error on stderr. If the command is missing, Pi is older than 0.87 or the configuration did not enable Live Compact.
 5. Confirm that upstream Pi was not patched and that the SoL-Pi checkout contains no vendored Pi monorepo source.
 
 ## Completion report
@@ -206,7 +206,7 @@ Report:
 - install scope and the exact entry shown by `pi list`;
 - configuration profile;
 - effective config path, four enabled flags, EPR reducer provider/model, and `cacheWriteReadRatio`, without secrets;
-- for `live-compact`: the effective `liveCompact` thresholds and protection values, and whether `/live-compact` was registered;
+- for `live-compact`: the effective `liveCompact` strategy, thresholds, protection, and summary/verification routes, and whether `/ambient-compact` (and `/live-compact`) was registered;
 - every validation command and result;
 - any blocker or deviation.
 

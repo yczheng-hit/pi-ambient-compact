@@ -1,7 +1,7 @@
 {
-	"name": "sol-pi",
+	"name": "pi-ambient-compact",
 	"version": "0.1.1",
-	"description": "Standalone context and tool-efficiency extensions for Pi",
+	"description": "Ambient context compaction and tool-efficiency extension for Pi",
 	"type": "module",
 	"private": true,
 	"files": [
@@ -12,6 +12,7 @@
 		"scripts/check-sol-pi-config.mjs",
 		"agents-install.md",
 		"README.md",
+		"README.en.md",
 		"LICENSE",
 		"CONTRIBUTING.md",
 		"SECURITY.md",

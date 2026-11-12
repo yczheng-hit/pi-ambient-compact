@@ -11,7 +11,8 @@ export type SolPiTuiMechanism =
 	| "Observation Pack"
 	| "Luna Delegating"
 	| "Online Context Compact"
-	| "Live Compact";
+	| "Live Compact"
+	| "Ambient Compact";
 
 const STATUS_KEY = "sol-pi-savings";
 const STATUS_DURATION_MS = 4_000;

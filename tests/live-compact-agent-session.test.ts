@@ -361,6 +361,7 @@ describe("Live Compact feature wiring", () => {
 		const dynamic = register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true, strategy: "dynamic-ai" }) });
 		expect(dynamic.tools).toContain("context_recall");
 		expect(dynamic.commands).toContain("live-compact");
+		expect(dynamic.commands).toContain("ambient-compact");
 		for (const event of ["turn_end", "agent_before_settle", "context", "input", "session_before_compact", "model_select"]) {
 			expect(dynamic.events).toContain(event);
 		}
@@ -378,6 +379,7 @@ describe("Live Compact feature wiring", () => {
 		const live = register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true }) });
 		expect(live.tools).toContain("obs_recall");
 		expect(live.commands).toContain("live-compact");
+		expect(live.commands).toContain("ambient-compact");
 		// ObservationPack registers no context handler; OCC still observes context for request counts.
 		expect(live.events.filter((event) => event === "context").length).toBe(
 			legacy.events.filter((event) => event === "context").length - 1,

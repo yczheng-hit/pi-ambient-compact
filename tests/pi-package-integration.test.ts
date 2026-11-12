@@ -161,6 +161,7 @@ it.each([
 		// The protocol's Live Compact check: the /live-compact command is registered only in that profile.
 		const commands = records.find((record) => record.id === "commands")?.data?.commands as Array<{ name: string }>;
 		expect(commands.some((command) => command.name === "live-compact")).toBe("liveCompact" in profile);
+		expect(commands.some((command) => command.name === "ambient-compact")).toBe("liveCompact" in profile);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
