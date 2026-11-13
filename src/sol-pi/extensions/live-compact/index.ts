@@ -409,9 +409,13 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 	};
 }
 
-export function registerLiveCompact(pi: ExtensionAPI, config: LiveCompactConfig): void {
+export function registerLiveCompact(
+	pi: ExtensionAPI,
+	config: LiveCompactConfig,
+	initialContext?: ExtensionContext,
+): void {
 	if (config.strategy === "dynamic-ai") {
-		createDynamicCompactExtension({ config, planner: createAiPlanner({ config }) })(pi);
+		createDynamicCompactExtension({ config, planner: createAiPlanner({ config }), initialContext })(pi);
 		return;
 	}
 	createLiveCompactExtension({ config })(pi);

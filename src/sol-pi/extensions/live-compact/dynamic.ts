@@ -124,6 +124,8 @@ export interface DynamicCompactOptions {
 	readonly configPath?: (ctx: ExtensionContext) => string | undefined;
 	/** Test hook: wall clock. */
 	readonly now?: () => number;
+	/** Context of the session_start event when registered dynamically at session_start. */
+	readonly initialContext?: ExtensionContext;
 }
 
 type BoundaryEvent = TurnEndEvent & { type: string };
@@ -253,6 +255,9 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		pi.on("session_tree", resetAndShow);
 		pi.on("session_compact", resetAndShow);
 		pi.on("model_select", resetAndShow);
+		if (options.initialContext) {
+			queueMicrotask(() => resetAndShow(undefined, options.initialContext!));
+		}
 
 		const effectiveConfig = (ctx: ExtensionContext): LiveCompactConfig =>
 			configResolver.resolve(ctx, configPathOf(ctx), buildLiveCompactSettingFields(ctx)).config;

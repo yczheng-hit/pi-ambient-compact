@@ -21,6 +21,7 @@ export function registerConfiguredFeatures(
 	config: SolPiConfig,
 	bashOptions?: BashToolOptions,
 	piVersion: string = VERSION,
+	initialContext?: ExtensionContext,
 ): void {
 	if (config.actionFusion) createActionFusionExtension({ bashOptions })(pi);
 	// Decided once at registration, so a session never switches between modes midway.
@@ -41,7 +42,7 @@ export function registerConfiguredFeatures(
 			economicCompaction: !liveCompact,
 		})(pi);
 	}
-	if (liveCompact) registerLiveCompact(pi, config.liveCompact);
+	if (liveCompact) registerLiveCompact(pi, config.liveCompact, initialContext);
 }
 
 export type SolPiConfigLoader = (ctx: ExtensionContext) => SolPiConfig;
@@ -58,7 +59,7 @@ export function createSolPiExtension(
 			const bashOptions = config.actionFusion
 				? loadActionFusionBashOptions(ctx.cwd, ctx.isProjectTrusted())
 				: undefined;
-			registerConfiguredFeatures(pi, config, bashOptions);
+			registerConfiguredFeatures(pi, config, bashOptions, VERSION, ctx);
 		});
 	};
 }
