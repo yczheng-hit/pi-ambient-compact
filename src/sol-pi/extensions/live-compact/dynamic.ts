@@ -65,7 +65,10 @@ import {
 	pressureLevels,
 	requestInputTokens,
 } from "./budget.ts";
+import type { BatchBegin } from "./commit.ts";
 import { BATCH_BEGIN, batchDrafts, completionDrafts, findIncompleteBatches, orderPrefixSafe, type PlannedEdit } from "./commit.ts";
+import { LIVE_CARD_HEADER } from "./card.ts";
+import type { BatchMeta } from "./archive.ts";
 import { type Planner, type PlanUsage, renderSegment, userTurns } from "./planner.ts";
 import { describeRoute, parseRouteArgument, ROUTE_KINDS, ROUTES_ENTRY, type RouteKind, RouteStore, writeGlobalRoute } from "./routes.ts";
 import { buildLiveCompactSettingFields, canOpenSettingsTui, openLiveCompactSettingsPane } from "./settings-pane.ts";
@@ -241,13 +244,15 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			lastAfter = undefined;
 			noGain = undefined;
 		};
-		pi.on("session_start", (_event, ctx) => {
+		const resetAndShow = (_event: unknown, ctx: ExtensionContext): void => {
 			reset();
 			configResolver.prime(configPathOf(ctx));
-		});
-		pi.on("session_tree", reset);
-		pi.on("session_compact", reset);
-		pi.on("model_select", reset);
+			showBarStatus(ctx);
+		};
+		pi.on("session_start", resetAndShow);
+		pi.on("session_tree", resetAndShow);
+		pi.on("session_compact", resetAndShow);
+		pi.on("model_select", resetAndShow);
 
 		const effectiveConfig = (ctx: ExtensionContext): LiveCompactConfig =>
 			configResolver.resolve(ctx, configPathOf(ctx), buildLiveCompactSettingFields(ctx)).config;
@@ -258,6 +263,49 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		};
 		const levelsFor = (ctx: ExtensionContext) =>
 			pressureLevels(ctx.model?.contextWindow, ctx.model?.maxTokens, effectiveConfig(ctx), piCompactionReserve(pi, ctx));
+
+		const measureProjection = (
+			messages: readonly AgentMessage[],
+			updateCalibration: boolean,
+		): { readonly projected: number; readonly ratio: number } => {
+			const lastAssistant = messages.findLastIndex((message) => message.role === "assistant");
+			const realInput = lastAssistant >= 0 ? requestInputTokens(messages[lastAssistant]!) : undefined;
+			const sample = calibrationSample(realInput, estimateMessagesTokens(messages.slice(0, Math.max(0, lastAssistant))));
+			if (updateCalibration && sample !== undefined) calibration = ema(calibration, sample);
+			const ratio = calibration ?? sample ?? 1;
+			const projected =
+				realInput !== undefined
+					? realInput + Math.ceil(estimateMessagesTokens(messages.slice(lastAssistant)) * ratio)
+					: Math.ceil(estimateMessagesTokens(messages) * ratio);
+			return { projected, ratio };
+		};
+
+		function showBarStatus(ctx: ExtensionContext): void {
+			if (!ctx.hasUI || typeof ctx.ui?.setStatus !== "function") return;
+			if (running) {
+				ctx.ui.setStatus(DYNAMIC_STATUS_KEY, "Ambient Compact: reviewing history…");
+				return;
+			}
+			const currentLevels = levels ?? levelsFor(ctx);
+			if (!currentLevels) {
+				ctx.ui.setStatus(DYNAMIC_STATUS_KEY, "Ambient Compact: dynamic-ai");
+				return;
+			}
+			const window = currentLevels.contextWindow;
+			let currentTokens = lastAfter;
+			if (currentTokens === undefined && typeof ctx.sessionManager.buildSessionProjection === "function") {
+				try {
+					currentTokens = measureProjection(ctx.sessionManager.buildSessionProjection().messages, false).projected;
+				} catch {
+					currentTokens = undefined;
+				}
+			}
+			const pending = findIncompleteBatches(ctx.sessionManager.getBranch()).length > 0;
+			ctx.ui.setStatus(
+				DYNAMIC_STATUS_KEY,
+				`Ambient Compact ${percent(currentTokens, window)} · band ${percent(currentLevels.target, window)}–${percent(currentLevels.start, window)} (urgent ${percent(currentLevels.ceiling, window)})${pending ? " · batch pending" : ""}`,
+			);
+		}
 
 		/** Calibrated input estimate for the next request, from a boundary preview. */
 		const measure = (event: BoundaryEvent): number => {
@@ -417,7 +465,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				outcome = ctx.signal?.aborted ? "aborted" : "failed";
 				note = error instanceof Error ? error.message : String(error);
 			} finally {
-				status(ctx, undefined);
+				showBarStatus(ctx);
 			}
 
 			const state2: DynamicState = {
@@ -479,7 +527,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			if (!currentLevels) return "the model window is unknown";
 			levels = currentLevels;
 			const projection = ctx.sessionManager.buildSessionProjection();
-			const projected = lastAfter ?? Math.ceil(estimateMessagesTokens(projection.messages) * (calibration ?? 1));
+			const projected = lastAfter ?? measureProjection(projection.messages, true).projected;
 			running = true;
 			try {
 				const result = await runCycle(ctx, trigger, projection.entries, projection.messages, projected, currentLevels, true);
@@ -497,6 +545,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				return result;
 			} finally {
 				running = false;
+				showBarStatus(ctx);
 			}
 		};
 
@@ -537,11 +586,13 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			}
 			if (!isResult(result)) {
 				report(result);
+				showBarStatus(ctx);
 				admit(projected);
 				return;
 			}
 			lastAfter = result.after;
 			report(result.report);
+			showBarStatus(ctx);
 			admit(result.after);
 			return {
 				entries: [...event.entries, ...result.batch, { type: "custom", customType: DYNAMIC_STATE_ENTRY, data: result.state } as SessionBoundaryDraft],
@@ -644,26 +695,144 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 
 		const routeLines = (ctx: ExtensionContext): string[] => {
 			const routes = routesFor(ctx);
-			const lines = ROUTE_KINDS.map((kind) => `${kind}: ${describeRoute(routes[kind].call)} (${routes[kind].source})`);
+			const workingLabel = ctx.model ? `working model → ${ctx.model.provider}/${ctx.model.id}` : "working model";
+			const lines = ROUTE_KINDS.map((kind) => {
+				const call = routes[kind].call;
+				const label = call.provider && call.model ? `${call.provider}/${call.model}` : workingLabel;
+				return `${kind}: ${label} (${routes[kind].source})`;
+			});
 			if (routes.globalError) lines.push(`global configuration error, last good routes in use: ${routes.globalError}`);
 			return lines;
 		};
 
 		const statusLines = (ctx: ExtensionContext): string[] => {
-			const window = levels?.contextWindow;
-			const state = latestState(ctx.sessionManager.getBranch());
+			const branch = ctx.sessionManager.getBranch();
+			const activeConfig = effectiveConfig(ctx);
+			const currentLevels = levels ?? levelsFor(ctx);
+			const window = currentLevels?.contextWindow;
+			const state = latestState(branch);
+			let currentTokens = lastAfter;
+			let ratio = calibration ?? 1;
+			let projectionEntries: readonly ProjectedSessionEntry[] = [];
+			if (typeof ctx.sessionManager.buildSessionProjection === "function") {
+				try {
+					const projection = ctx.sessionManager.buildSessionProjection();
+					projectionEntries = projection.entries;
+					const measured = measureProjection(projection.messages, false);
+					if (currentTokens === undefined) currentTokens = measured.projected;
+					ratio = measured.ratio;
+				} catch {
+					// Keep fallback values when projection is unavailable in a minimal test double.
+				}
+			}
+
+			// 1. Candidate pool & protected counts
+			const index = indexSegments(projectionEntries, {
+				keepRecentToolRounds: activeConfig.protection.keepRecentToolRounds,
+			});
+			const episodes = index.segments.filter((segment) => segment.kind === "episode").length;
+			const roundRuns = index.segments.length - episodes;
+			const totalCandidateTokens = Math.ceil(
+				index.segments.reduce((sum, segment) => sum + segment.tokens, 0) * ratio,
+			);
+			const minSavings = currentLevels ? Math.ceil(activeConfig.maintenance.minSavingsRatio * currentLevels.contextWindow) : 0;
+			const goal = currentLevels && currentTokens !== undefined ? Math.max(0, currentTokens - currentLevels.target) : 0;
+			let poolCount = 0;
+			let poolRawTokens = 0;
+			for (const segment of index.segments) {
+				if (poolCount > 0 && poolRawTokens * ratio >= goal * 1.5) break;
+				if ((poolRawTokens + segment.tokens) * ratio > MAX_POOL_TOKENS) break;
+				poolCount += 1;
+				poolRawTokens += segment.tokens;
+			}
+			const poolRealTokens = Math.ceil(poolRawTokens * ratio);
+
+			// 2. Next trigger gate
+			const incomplete = findIncompleteBatches(branch);
+			const requests = requestCount(branch);
+			const routes = routeFingerprint(ctx);
+			const { cooldownRequests, retryGrowthRatio } = activeConfig.maintenance;
+			let gateLine = "gate: waiting for model window";
+			if (incomplete.length > 0) {
+				const remainingEdits = incomplete.reduce((sum, batch) => sum + batch.remaining.length, 0);
+				gateLine = `gate: pending_batch · ${incomplete.length} batch(es) queued (${remainingEdits} edits); applies on next request and persists at next boundary`;
+			} else if (currentLevels && currentTokens !== undefined) {
+				const urgent = currentTokens >= currentLevels.ceiling;
+				const routesChanged = state?.routes !== undefined && state.routes !== routes;
+				const urgentRetryDue = urgent && state?.at !== undefined && now() - state.at >= URGENT_RETRY_MS;
+				if (currentTokens < currentLevels.start) {
+					const delta = currentLevels.start - currentTokens;
+					gateLine = `gate: idle · ${delta.toLocaleString("en-US")} tokens (${percent(delta, window)}) below start threshold`;
+				} else if (state && !urgent && requests - state.requestCount < cooldownRequests) {
+					const left = cooldownRequests - (requests - state.requestCount);
+					gateLine = `gate: cooldown · ${left}/${cooldownRequests} request(s) remaining (or cross urgent ${percent(currentLevels.ceiling, window)})`;
+				} else if (
+					state &&
+					state.outcome !== "committed" &&
+					!routesChanged &&
+					!urgentRetryDue &&
+					currentTokens < state.projected + retryGrowthRatio * currentLevels.contextWindow
+				) {
+					const needed = Math.ceil(state.projected + retryGrowthRatio * currentLevels.contextWindow - currentTokens);
+					const waitSec =
+						urgent && state.at !== undefined ? Math.max(1, Math.ceil((URGENT_RETRY_MS - (now() - state.at)) / 1_000)) : undefined;
+					gateLine = `gate: backoff · needs +${needed.toLocaleString("en-US")} tokens growth${waitSec !== undefined ? ` or ${waitSec}s until urgent retry` : ""}`;
+				} else if (poolCount === 0) {
+					gateLine = "gate: no_candidates · above start threshold, but no eligible segments to summarize";
+				} else if (!urgent && poolRealTokens * 0.9 < minSavings) {
+					gateLine = `gate: below_min_savings · pool (~${poolRealTokens.toLocaleString("en-US")} tokens) is below min savings (${minSavings.toLocaleString("en-US")} tokens)`;
+				} else {
+					gateLine = `gate: ready · eligible for maintenance at next boundary${urgent ? " (urgent)" : ""} (or run /ambient-compact now)`;
+				}
+			}
+
+			// 3. Session cumulative totals
+			let committedCycles = 0;
+			let totalReclaimed = 0;
+			let summarizedSegments = 0;
+			let toolCards = 0;
+			for (const entry of branch) {
+				if (entry.type === "custom" && entry.customType === DYNAMIC_STATE_ENTRY) {
+					const d = entry.data as DynamicState | undefined;
+					if (d?.v === 1 && d.outcome === "committed") {
+						committedCycles += 1;
+						totalReclaimed += Math.max(0, d.reclaimed);
+					}
+				} else if (entry.type === "custom" && entry.customType === BATCH_BEGIN) {
+					const b = entry.data as BatchBegin | undefined;
+					const meta = b?.meta as BatchMeta | undefined;
+					summarizedSegments += meta?.segments?.length ?? 0;
+				} else if (
+					entry.type === "context_edit" &&
+					entry.replacement !== null &&
+					JSON.stringify(entry.replacement).includes(LIVE_CARD_HEADER)
+				) {
+					toolCards += 1;
+				}
+			}
+
+			const configPath = configPathOf(ctx);
+			const sessionOverrides = Object.keys(
+				configResolver.resolve(ctx, configPath, buildLiveCompactSettingFields(ctx)).session.changes,
+			).length;
+
 			return [
 				"Ambient Compact: dynamic-ai",
-				levels
-					? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, urgent ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens`
+				currentLevels
+					? `levels: start ${percent(currentLevels.start, window)} (${currentLevels.start.toLocaleString("en-US")}), target ${percent(currentLevels.target, window)} (${currentLevels.target.toLocaleString("en-US")}), urgent ${percent(currentLevels.ceiling, window)} (${currentLevels.ceiling.toLocaleString("en-US")}), safe input ${percent(currentLevels.safeInputLimit, window)} (${currentLevels.safeInputLimit.toLocaleString("en-US")}) of ${window?.toLocaleString("en-US")} tokens`
 					: "levels: unknown until the first completed turn with a known model window",
-				`context: ${percent(lastAfter, window)} after the last boundary`,
+				`context: ${currentTokens !== undefined && window ? `${currentTokens.toLocaleString("en-US")} / ${window.toLocaleString("en-US")} tokens (${percent(currentTokens, window)})` : `${percent(currentTokens, window)} after the last boundary`} · calibration ${ratio.toFixed(2)}x`,
+				gateLine,
+				`candidates: ${index.segments.length} segment(s) (${episodes} episode(s), ${roundRuns} tool-round run(s)), ~${totalCandidateTokens.toLocaleString("en-US")} tokens (~${poolRealTokens.toLocaleString("en-US")} in next pool, min savings ${minSavings.toLocaleString("en-US")})`,
+				`protected: recent rounds ${index.kept.recent_round ?? 0}, already edited ${index.kept.edited ?? 0}, errors ${index.kept.error_result ?? 0}, small ${index.kept.small ?? 0}`,
 				...routeLines(ctx),
+				`config: ${configPath ?? "defaults (no sol-pi.json)"}${sessionOverrides > 0 ? ` · ${sessionOverrides} session override(s) active (~)` : ""}`,
+				`session totals: ${committedCycles} cycle(s) committed, ${summarizedSegments} segment(s) summarized, ${toolCards} tool card(s), ~${totalReclaimed.toLocaleString("en-US")} tokens reclaimed`,
 				lastReport
 					? `last boundary: ${lastReport.outcome} (${lastReport.reason.slice(0, 200)}); segments ${lastReport.segments}, selected ${lastReport.selected}, model calls ${lastReport.usage.calls}`
 					: "last boundary: none yet",
 				state
-					? `last cycle: ${state.outcome} at request ${state.requestCount}, ${percent(state.projected, window)}, reclaimed ${state.reclaimed} tokens${state.note ? ` (${state.note.slice(0, 200)})` : ""}`
+					? `last cycle: ${state.outcome} at request ${state.requestCount}, ${percent(state.projected, window)}, reclaimed ${state.reclaimed.toLocaleString("en-US")} tokens, calls ${state.calls}${state.note ? ` (${state.note.slice(0, 200)})` : ""}`
 					: "last cycle: none in this branch",
 				"commands: /ambient-compact [settings|status|now|model ...]",
 			];
@@ -723,6 +892,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 							getSessionState: (c, fields) => configResolver.resolve(c, configPathOf(c), fields).session,
 							onChange: () => {
 								levels = levelsFor(ctx);
+								showBarStatus(ctx);
 							},
 							extraDetails: statusLines,
 							runNow: async (c) => formatNowResult(await runOutsideBoundary(c, "command")),

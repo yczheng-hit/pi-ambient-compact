@@ -67,6 +67,8 @@ type Run = {
 	readonly reports: CycleReport[];
 	readonly errors: string[];
 	readonly compactions: string[];
+	readonly notices: string[];
+	readonly statuses: string[];
 	readonly prompt: (text: string, responses: FauxResponseStep[]) => Promise<void>;
 	readonly pending: () => number;
 	readonly dispose: () => Promise<void>;
@@ -87,6 +89,7 @@ async function session(options: {
 	readonly summaryRoutes?: boolean;
 	readonly now?: () => number;
 	readonly configPath?: string;
+	readonly withUi?: boolean;
 }): Promise<Run> {
 	runs += 1;
 	const name = `dyn-${runs}`;
@@ -152,8 +155,22 @@ async function session(options: {
 		}),
 	});
 	const errors: string[] = [];
+	const notices: string[] = [];
+	const statuses: string[] = [];
 	agent.extensionRunner.onError((error) => errors.push(`${error.event}: ${error.error}`));
-	await agent.bindExtensions({ onError: () => undefined });
+	await agent.bindExtensions({
+		onError: () => undefined,
+		...(options.withUi
+			? {
+					uiContext: {
+						notify: (msg: string) => notices.push(msg),
+						setStatus: (_key: string, val: string | undefined) => {
+							if (val) statuses.push(val);
+						},
+					} as never,
+				}
+			: {}),
+	});
 	return {
 		cwd,
 		sessionManager,
@@ -161,6 +178,8 @@ async function session(options: {
 		reports,
 		errors,
 		compactions,
+		notices,
+		statuses,
 		pending: () => faux.getPendingResponseCount(),
 		prompt: async (text, responses) => {
 			faux.setResponses(
@@ -532,4 +551,30 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			await run.dispose();
 		}
 	});
+
+	it("reports live 5-section diagnostic status via /ambient-compact status and updates the status bar", async () => {
+		const run = await session({ withUi: true, live: { protection: { keepRecentToolRounds: 1 } } });
+		try {
+			await run.prompt("task A", [...dumps("a", 3), fauxAssistantMessage("A done")]);
+			await run.prompt("task B", [fauxAssistantMessage("B done")]);
+			await run.prompt("/ambient-compact now", []);
+			expect(run.statuses.some((st) => st.includes("batch pending"))).toBe(true);
+			await run.prompt("task C", [fauxAssistantMessage("C done")]);
+
+			await run.prompt("/ambient-compact status", []);
+			const statusText = run.notices.at(-1)!;
+			expect(statusText).toContain("Ambient Compact: dynamic-ai");
+			expect(statusText).toContain("levels: start 70% (14,000), target 50% (10,000), urgent 80% (16,000)");
+			expect(statusText).toContain("context:");
+			expect(statusText).toContain("gate:");
+			expect(statusText).toContain("candidates:");
+			expect(statusText).toContain("protected: recent rounds");
+			expect(statusText).toContain("summary: working model");
+			expect(statusText).toContain("session totals: 1 cycle(s) committed, 1 segment(s) summarized");
+			expect(run.statuses.at(-1)).toMatch(/^Ambient Compact \d+% · band 50%–70% \(urgent 80%\)$/u);
+		} finally {
+			await run.dispose();
+		}
+	});
+
 });
