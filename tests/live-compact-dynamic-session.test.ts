@@ -90,6 +90,7 @@ async function session(options: {
 	readonly now?: () => number;
 	readonly configPath?: string;
 	readonly withUi?: boolean;
+	readonly backgroundCycles?: boolean;
 }): Promise<Run> {
 	runs += 1;
 	const name = `dyn-${runs}`;
@@ -124,6 +125,7 @@ async function session(options: {
 			onReport: (report) => reports.push(report),
 			configPath: () => options.configPath,
 			...(options.now ? { now: options.now } : {}),
+			...(options.backgroundCycles ? { backgroundCycles: true } : {}),
 		})(pi);
 	};
 	const resourceLoader = new DefaultResourceLoader({
@@ -572,6 +574,45 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			expect(statusText).toContain("summary: working model");
 			expect(statusText).toContain("session totals: 1 cycle(s) committed, 1 segment(s) summarized");
 			expect(run.statuses.at(-1)).toMatch(/^Ambient Compact \d+% · band 50%–70% \(urgent 80%\)$/u);
+		} finally {
+			await run.dispose();
+		}
+	});
+
+	it("runs boundary maintenance in the background without blocking foreground prompts when backgroundCycles is enabled", async () => {
+		let resolvePlanner!: () => void;
+		const plannerStarted = new Promise<void>((resolve) => {
+			resolvePlanner = resolve;
+		});
+		let allowPlannerFinish!: () => void;
+		const plannerGate = new Promise<void>((resolve) => {
+			allowPlannerFinish = resolve;
+		});
+		const basePlanner = deterministicPlanner();
+		const slowPlanner: Planner = async (req, ctx) => {
+			resolvePlanner();
+			await plannerGate;
+			return basePlanner(req, ctx);
+		};
+		const run = await session({ backgroundCycles: true, planner: slowPlanner });
+		try {
+			await run.prompt("task A", [...dumps("a", 4), fauxAssistantMessage("A done")]);
+			await run.prompt("task B", [...dumps("b", 4), fauxAssistantMessage("B done")]);
+			// Task C crosses the 70% start threshold and triggers a background cycle, but prompt() returns immediately!
+			await run.prompt("task C", [...dumps("c", 5), fauxAssistantMessage("C done")]);
+			await plannerStarted;
+			// Foreground prompt is already settled while the background planner is still waiting on plannerGate!
+			allowPlannerFinish();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			expect(run.reports.some((r) => r.outcome === "committed")).toBe(true);
+			expect(findIncompleteBatches(run.sessionManager.getBranch())).toHaveLength(1);
+
+			// Next user prompt ("你加上吧") runs immediately, receives the compacted context in memory, and persists the batch!
+			await run.prompt("你加上吧", [fauxAssistantMessage("applied")]);
+			const lastReq = run.requests.at(-1)!;
+			expect(textOf(lastReq)).toContain("Live Compact history summary v1");
+			expect(textOf(lastReq)).not.toContain("a1 line 0000");
+			expect(findIncompleteBatches(run.sessionManager.getBranch())).toEqual([]);
 		} finally {
 			await run.dispose();
 		}

@@ -415,7 +415,7 @@ export function registerLiveCompact(
 	initialContext?: ExtensionContext,
 ): void {
 	if (config.strategy === "dynamic-ai") {
-		createDynamicCompactExtension({ config, planner: createAiPlanner({ config }), initialContext })(pi);
+		createDynamicCompactExtension({ config, planner: createAiPlanner({ config }), initialContext, backgroundCycles: true })(pi);
 		return;
 	}
 	createLiveCompactExtension({ config })(pi);

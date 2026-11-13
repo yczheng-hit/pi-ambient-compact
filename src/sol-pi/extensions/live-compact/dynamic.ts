@@ -126,6 +126,12 @@ export interface DynamicCompactOptions {
 	readonly now?: () => number;
 	/** Context of the session_start event when registered dynamically at session_start. */
 	readonly initialContext?: ExtensionContext;
+	/**
+	 * Run boundary maintenance cycles asynchronously in the background when projected usage is
+	 * within safeInputLimit, so turn_end / agent_before_settle return in <1ms and never block
+	 * the foreground prompt in Working state.
+	 */
+	readonly backgroundCycles?: boolean;
 }
 
 type BoundaryEvent = TurnEndEvent & { type: string };
@@ -217,6 +223,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		let lastReport: CycleReport | undefined;
 		let noGain: { readonly projected: number } | undefined;
 		let running = false;
+		let bgAbort: AbortController | undefined;
 		const routeStore = new RouteStore(config);
 		const configResolver = new LiveCompactConfigResolver(config);
 		const ledgers = new Map<string, Ledger>();
@@ -242,6 +249,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			else console.error(`[sol-pi] ${message}`);
 		};
 		const reset = (): void => {
+			bgAbort?.abort();
+			bgAbort = undefined;
 			calibration = undefined;
 			lastAfter = undefined;
 			noGain = undefined;
@@ -255,6 +264,10 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		pi.on("session_tree", resetAndShow);
 		pi.on("session_compact", resetAndShow);
 		pi.on("model_select", resetAndShow);
+		pi.on("session_shutdown", () => {
+			bgAbort?.abort();
+			bgAbort = undefined;
+		});
 		if (options.initialContext) {
 			queueMicrotask(() => resetAndShow(undefined, options.initialContext!));
 		}
@@ -345,6 +358,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			projected: number,
 			currentLevels: PressureLevels,
 			force: boolean,
+			signalOverride?: AbortSignal,
 		): Promise<CycleResult | CycleReport> => {
 			const window = currentLevels.contextWindow;
 			const ratio = calibration ?? 1;
@@ -382,6 +396,15 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			// Candidates, within the real-token pool limit.
 			const index = indexSegments(entries, { keepRecentToolRounds: activeConfig.protection.keepRecentToolRounds });
 			const minSavings = Math.ceil(minSavingsRatio * window);
+			const overSafeLimit = projected > currentLevels.safeInputLimit;
+			// Between urgent (80%) and safeInputLimit (95%), still require reclaiming at least 3% of the
+			// window (capped at minSavings) so a 1-segment ~1% reduction (81% → 80%) is not committed.
+			const effectiveMinSavings =
+				force || overSafeLimit
+					? 1
+					: urgent
+						? Math.min(minSavings, Math.max(1, Math.ceil(window * 0.03)))
+						: minSavings;
 			// An explicit or input-driven cycle reclaims at least the minimum, even below the target.
 			const goal = Math.max(0, projected - currentLevels.target, force ? minSavings : 0);
 			const pool: Segment[] = [];
@@ -392,7 +415,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				pool.push(segment);
 				poolTokens += segment.tokens;
 			}
-			if (pool.length === 0 || (!force && !urgent && poolTokens * ratio * 0.9 < minSavings)) {
+			if (pool.length === 0 || (!force && poolTokens * ratio * 0.9 < effectiveMinSavings)) {
 				noGain = { projected };
 				return skipped(pool.length === 0 ? "no_candidates" : "below_min_savings", index.segments.length);
 			}
@@ -413,7 +436,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						candidates: pool,
 						reclaimTokens: goal,
 						userTurns: userTurns(messages),
-						signal: cycleSignal(ctx.signal, timeoutMs),
+						signal: cycleSignal(signalOverride ?? ctx.signal, timeoutMs),
 						tokenRatio: ratio,
 						routes: { summary: effective.summary.call, verification: effective.verification.call },
 					},
@@ -456,7 +479,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						const saved = estimateMessagesTokens(index.messages.map((item) => item.message)) - estimateMessagesTokens(editedMessages);
 						after = projected - Math.floor(saved * ratio);
 						selected = archived.length;
-						if ((!force && !urgent && projected - after < minSavings) || after >= projected) {
+						if (projected - after < effectiveMinSavings || after >= projected) {
 							outcome = "insufficient";
 							after = projected;
 						} else {
@@ -467,7 +490,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					}
 				}
 			} catch (error) {
-				outcome = ctx.signal?.aborted ? "aborted" : "failed";
+				const activeSignal = signalOverride ?? ctx.signal;
+				outcome = activeSignal?.aborted ? "aborted" : "failed";
 				note = error instanceof Error ? error.message : String(error);
 			} finally {
 				showBarStatus(ctx);
@@ -581,6 +605,59 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					ctx.abort();
 				}
 			};
+
+			// When within safeInputLimit and backgroundCycles is enabled, run the cycle asynchronously
+			// without awaiting it in the boundary hook, so the foreground turn settles in <1ms and
+			// never blocks the user's next prompt in Working state.
+			if (options.backgroundCycles && projected <= currentLevels.safeInputLimit) {
+				const entriesSnapshot = [...event.context.contextEntries];
+				const messagesSnapshot = [...event.context.contextMessages];
+				const controller = new AbortController();
+				bgAbort = controller;
+				running = true;
+				void (async () => {
+					try {
+						const bgResult = await runCycle(
+							ctx,
+							trigger,
+							entriesSnapshot,
+							messagesSnapshot,
+							projected,
+							currentLevels,
+							false,
+							controller.signal,
+						);
+						if (controller.signal.aborted) return;
+						if (!isResult(bgResult)) {
+							report(bgResult);
+							return;
+						}
+						const begin = bgResult.batch[0];
+						if (bgResult.outcome === "committed" && begin?.type === "custom") {
+							const currentBranch = ctx.sessionManager.getBranch();
+							const branchIds = new Set(currentBranch.map((entry) => entry.id));
+							const alreadyEditedIds = new Set(
+								currentBranch.flatMap((entry) => (entry.type === "context_edit" ? [entry.targetId] : [])),
+							);
+							const edits = bgResult.batch.flatMap((draft) => (draft.type === "context_edit" ? [draft] : []));
+							const stillValid = edits.every(
+								(edit) => branchIds.has(edit.targetId) && !alreadyEditedIds.has(edit.targetId),
+							);
+							if (stillValid) {
+								pi.appendEntry(begin.customType, begin.data);
+								lastAfter = bgResult.after;
+							}
+						}
+						pi.appendEntry(DYNAMIC_STATE_ENTRY, bgResult.state);
+						report(bgResult.report);
+					} finally {
+						if (bgAbort === controller) bgAbort = undefined;
+						running = false;
+						showBarStatus(ctx);
+					}
+				})();
+				return;
+			}
 
 			running = true;
 			let result: CycleResult | CycleReport;
