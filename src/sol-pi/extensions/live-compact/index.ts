@@ -80,7 +80,7 @@ export function registerLiveCompactUnsupportedNotice(pi: ExtensionAPI, version: 
 		if (shown || !ctx.hasUI) return;
 		shown = true;
 		ctx.ui.notify(
-			`Live Compact needs Pi ${LIVE_COMPACT_MIN_PI_VERSION} or newer (running ${version}); it is inactive, ` +
+			`Ambient Compact needs Pi ${LIVE_COMPACT_MIN_PI_VERSION} or newer (running ${version}); it is inactive, ` +
 				"and ObservationPack and Online Context Compact keep their standard behavior.",
 			"warning",
 		);
@@ -199,8 +199,8 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			ctx.ui.setStatus(
 				LIVE_COMPACT_STATUS_KEY,
 				supported === false
-					? "Live Compact inactive (needs Pi >= 0.87)"
-					: `Live Compact ${percent(lastAfter, window)} · target ${percent(levels?.target, window)} · ceiling ${percent(levels?.ceiling, window)}`,
+					? "Ambient Compact inactive (needs Pi >= 0.87)"
+					: `Ambient Compact ${percent(lastAfter, window)} · target ${percent(levels?.target, window)} · ceiling ${percent(levels?.ceiling, window)}`,
 			);
 		};
 		const resetMeasurements = (): void => {
@@ -229,7 +229,7 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			await record(ctx, { event: "native_compaction", reason: event.reason, projected, shortfall: lastShortfall });
 			if (ctx.hasUI) {
 				ctx.ui.notify(
-					`Live Compact: local condensing could not keep context below Pi's compaction threshold (${event.reason}); ` +
+					`Ambient Compact: local condensing could not keep context below Pi's compaction threshold (${event.reason}); ` +
 						"Pi's native compaction is running. Bounded prefix summaries are not available in this build yet.",
 					"warning",
 				);
@@ -239,7 +239,7 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 		pi.on("turn_end", async (event, ctx) => {
 			if (!hasBoundaryApi(event)) {
 				if (supported === undefined && ctx.hasUI) {
-					ctx.ui.notify("Live Compact needs Pi 0.87 or newer (turn_end boundary entries); it stays inactive.", "warning");
+					ctx.ui.notify("Ambient Compact needs Pi 0.87 or newer (turn_end boundary entries); it stays inactive.", "warning");
 				}
 				supported = false;
 				showStatus(ctx);
@@ -362,7 +362,7 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 		const statusLines = (): string[] => {
 			const window = levels?.contextWindow;
 			return [
-				`Live Compact: ${supported === false ? "inactive (needs Pi >= 0.87)" : "enabled (local-tools)"}`,
+				`Ambient Compact: ${supported === false ? "inactive (needs Pi >= 0.87)" : "enabled (local-tools)"}`,
 				levels
 					? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, ceiling ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens${levels.clamped ? (levels.inputLimit === levels.compactionLimit ? " (lowered under Pi's compaction threshold)" : " (lowered under the safe limit)") : ""}`
 					: "levels: unknown until the first completed turn with a known model window",
@@ -406,7 +406,6 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			},
 		};
 		pi.registerCommand("ambient-compact", commandSpec);
-		pi.registerCommand("live-compact", commandSpec);
 	};
 }
 

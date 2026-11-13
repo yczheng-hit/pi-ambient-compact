@@ -345,7 +345,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			}
 
 			// Plan.
-			status(ctx, "Live Compact: reviewing history…");
+			status(ctx, "Ambient Compact: reviewing history…");
 			let outcome: CycleOutcome = "failed";
 			let note: string | undefined;
 			let usage: PlanUsage = NO_USAGE;
@@ -461,10 +461,10 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				usage,
 			};
 			if (outcome === "committed") {
-				notify(ctx, `Live Compact: summarized ${selected} history segment(s), ${percent(projected, window)} → ${percent(after, window)}.`, "info");
+				notify(ctx, `Ambient Compact: summarized ${selected} history segment(s), ${percent(projected, window)} → ${percent(after, window)}.`, "info");
 			} else if (outcome !== "aborted") {
 				noGain = { projected };
-				if (outcome === "failed") notify(ctx, `Live Compact: maintenance failed (${(note ?? "").slice(0, 200)}). History is unchanged.`, "warning");
+				if (outcome === "failed") notify(ctx, `Ambient Compact: maintenance failed (${(note ?? "").slice(0, 200)}). History is unchanged.`, "warning");
 			}
 			return { outcome, after, report: cycleReport, batch, state: state2 };
 		};
@@ -521,7 +521,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				if (trigger === "turn_end" && after > currentLevels.safeInputLimit) {
 					notify(
 						ctx,
-						`Live Compact: the context (${percent(after, currentLevels.contextWindow)}) is above the safe input limit and could not be reduced; the run is paused. Run /live-compact now (optionally after /live-compact model summary <provider>/<model>) or /compact.`,
+						`Ambient Compact: the context (${percent(after, currentLevels.contextWindow)}) is above the safe input limit and could not be reduced; the run is paused. Run /ambient-compact now (optionally after /ambient-compact model summary <provider>/<model>) or /compact.`,
 						"warning",
 					);
 					ctx.abort();
@@ -586,7 +586,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			if (lastAfter + incoming <= levels.safeInputLimit) return;
 			notify(
 				ctx,
-				`Live Compact: this input (~${incoming} tokens) does not fit the remaining context (${percent(lastAfter, levels.contextWindow)} used, safe limit ${percent(levels.safeInputLimit, levels.contextWindow)})${typeof attempt === "string" ? "" : `; maintenance: ${attempt.outcome === "skipped" ? attempt.reason : attempt.outcome}`}. It was not sent; shorten it, or run /compact.`,
+				`Ambient Compact: this input (~${incoming} tokens) does not fit the remaining context (${percent(lastAfter, levels.contextWindow)} used, safe limit ${percent(levels.safeInputLimit, levels.contextWindow)})${typeof attempt === "string" ? "" : `; maintenance: ${attempt.outcome === "skipped" ? attempt.reason : attempt.outcome}`}. It was not sent; shorten it, or run /compact.`,
 				"warning",
 			);
 			return { action: "handled" as const };
@@ -638,7 +638,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			},
 			renderCall(params, theme) {
 				const base = new Text(theme.fg("dim", `Recall ${params.id} from byte ${params.offset ?? 0}`), 0, 0);
-				return renderSolPiTool(theme, "Live Compact", "summarized history recalled", base);
+				return renderSolPiTool(theme, "Ambient Compact", "summarized history recalled", base);
 			},
 		});
 
@@ -653,7 +653,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const window = levels?.contextWindow;
 			const state = latestState(ctx.sessionManager.getBranch());
 			return [
-				"Live Compact: dynamic-ai",
+				"Ambient Compact: dynamic-ai",
 				levels
 					? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, urgent ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens`
 					: "levels: unknown until the first completed turn with a known model window",
@@ -665,14 +665,14 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				state
 					? `last cycle: ${state.outcome} at request ${state.requestCount}, ${percent(state.projected, window)}, reclaimed ${state.reclaimed} tokens${state.note ? ` (${state.note.slice(0, 200)})` : ""}`
 					: "last cycle: none in this branch",
-				"commands: /ambient-compact [settings|status|now|model ...] (alias: /live-compact)",
+				"commands: /ambient-compact [settings|status|now|model ...]",
 			];
 		};
 
 		/** `/live-compact model <kind> <provider/model|default> [--global]` */
 		const setRoute = (args: readonly string[], ctx: ExtensionContext): string => {
 			const kind = args[0] as RouteKind | undefined;
-			if (!kind || !ROUTE_KINDS.includes(kind)) return "usage: /live-compact model <summary|verification> <provider>/<model>|default [--global]";
+			if (!kind || !ROUTE_KINDS.includes(kind)) return "usage: /ambient-compact model <summary|verification> <provider>/<model>|default [--global]";
 			const global = args.includes("--global");
 			const value = args.filter((arg) => !arg.startsWith("--"))[1];
 			const route = value === undefined ? undefined : parseRouteArgument(value);
@@ -732,19 +732,18 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						ctx.ui.notify(statusLines(ctx).join("\n"), "info");
 					} else if (command === "now") {
 						const result = await runOutsideBoundary(ctx, "command");
-						ctx.ui.notify(`Live Compact: ${formatNowResult(result)}`, "info");
+						ctx.ui.notify(`Ambient Compact: ${formatNowResult(result)}`, "info");
 					} else if (command === "model") {
-						ctx.ui.notify(rest.length === 0 ? routeLines(ctx).join("\n") : `Live Compact: ${setRoute(rest, ctx)}`, "info");
+						ctx.ui.notify(rest.length === 0 ? routeLines(ctx).join("\n") : `Ambient Compact: ${setRoute(rest, ctx)}`, "info");
 					} else {
-						ctx.ui.notify(`Live Compact: unknown subcommand ${command}\n${statusLines(ctx).at(-1)}`, "warning");
+						ctx.ui.notify(`Ambient Compact: unknown subcommand ${command}\n${statusLines(ctx).at(-1)}`, "warning");
 					}
 				} catch (error) {
-					ctx.ui.notify(`Live Compact: ${error instanceof Error ? error.message : String(error)}`, "error");
+					ctx.ui.notify(`Ambient Compact: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}
 			},
 		};
 		pi.registerCommand("ambient-compact", commandSpec);
-		pi.registerCommand("live-compact", commandSpec);
 	};
 }
 

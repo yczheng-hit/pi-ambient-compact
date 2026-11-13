@@ -58,8 +58,8 @@
 
 | 模块 | 策略 / 工具 / 命令 | 功能说明 |
 |---|---|---|
-| **Ambient Compact (`dynamic-ai`)** | `/ambient-compact`（别名 `/live-compact`）、`context_recall` | **全局 AI 选择性压缩策略（推荐）**：在 30%–70% 区间自动评估完整历史片段（Episodes & Tool Rounds），经 `summary` + `verification` 双模型生成并核验摘要，原文归档可通过 `context_recall` 分页召回。 |
-| **Ambient Compact (`local-tools`)** | `/ambient-compact`（别名 `/live-compact`）、`obs_recall` | **本地零模型收短策略**：不调用摘要模型，仅在突破水位上限时将最旧的 >10KiB 纯文本成功工具输出替换为带 SHA-256 与首尾逐字摘录（默认 8KiB）的卡片。 |
+| **Ambient Compact (`dynamic-ai`)** | `/ambient-compact`、`context_recall` | **全局 AI 选择性压缩策略（推荐）**：在 30%–70% 区间自动评估完整历史片段（Episodes & Tool Rounds），经 `summary` + `verification` 双模型生成并核验摘要，原文归档可通过 `context_recall` 分页召回。 |
+| **Ambient Compact (`local-tools`)** | `/ambient-compact`、`obs_recall` | **本地零模型收短策略**：不调用摘要模型，仅在突破水位上限时将最旧的 >10KiB 纯文本成功工具输出替换为带 SHA-256 与首尾逐字摘录（默认 8KiB）的卡片。 |
 | **ObservationPack** | `obs_recall` | 为大型纯文本工具输出提供内容寻址归档与精确字节/行分页召回；在开启 Ambient Compact 时自动移交投影控制权，仅负责归档与 `obs_recall` 召回。 |
 | **Online Context Compact** | `update_plan` | 提供结构化工作计划工具 `update_plan`；在未开启 Ambient Compact 时可按 `cacheWriteReadRatio` 经济比在步骤完成边界触发压缩，开启 Ambient Compact 后自动关闭价格触发以避免深压缩冲突。 |
 | **Action Fusion** | `edit` / `write` (`then_run`) | 为内置 `edit` 和 `write` 增加可选的 `then_run` 跟进验证命令；自动尊重 `pi-hashline-edit-pro` 与 `pi-openai-codex-compat` (`apply_patch`) 的工具禁用状态，若被其他扩展覆盖则在首次提问时主动提示。 |
@@ -71,7 +71,7 @@
 
 ### 1. 交互式 TUI 设置面板（`/ambient-compact`）
 
-在 Pi 的 TUI 模式下，直接输入 **`/ambient-compact`**（或 `/ambient-compact settings`，兼容别名 `/live-compact`），即可打开与 `/codex-settings` 完全一致的交互式设置面板：
+在 Pi 的 TUI 模式下，直接输入 **`/ambient-compact`**（或 `/ambient-compact settings`），即可打开与 `/codex-settings` 完全一致的交互式设置面板：
 
 - **即时搜索**：直接输入字符即可按名称、配置键名或描述过滤设置项。
 - **水位与模型自由调节**：
@@ -89,7 +89,7 @@
 
 ### 2. 命令行子命令
 
-在 TUI 或非 TUI 模式下均可直接使用子命令（`/ambient-compact` 与 `/live-compact` 均支持）：
+在 TUI 或非 TUI 模式下均可直接使用子命令：
 
 | 命令 | 作用 |
 |---|---|
@@ -207,7 +207,7 @@
      ```bash
      printf '{"id":"commands","type":"get_commands"}\n' | pi --offline --approve --no-session --mode rpc
      ```
-     确认返回结果中包含 `ambient-compact`（及 `live-compact`），且 stderr 无扩展错误。
+     确认返回结果中包含 `ambient-compact`，且 stderr 无扩展错误。
 
 ---
 
@@ -218,8 +218,8 @@
 | [English README](README.en.md) | 英文版完整项目说明与使用指南 |
 | [AI 安装与配置协议 (`agents-install.md`)](agents-install.md) | 面向 Codex / Claude Code / Pi 的分阶段可复现安装、配置与验收标准 |
 | [配置参考 (`docs/configuration.md`)](docs/configuration.md) | 配置文件搜索顺序、`liveCompact` 完整 Schema、TUI 面板与命令说明 |
-| [动态全局压缩方案 (`docs/live-compact-dynamic-plan.md`)](docs/live-compact-dynamic-plan.md) | `dynamic-ai` 策略的架构设计、G0–G3 验证记录与真实数据抽样结果 |
-| [高保留模式总方案 (`docs/live-compact-plan.md`)](docs/live-compact-plan.md) | 初版水位状态机设计与 P0–P1 实施记录 |
+| [动态全局压缩方案 (`docs/ambient-compact-dynamic-plan.md`)](docs/ambient-compact-dynamic-plan.md) | `dynamic-ai` 策略的架构设计、G0–G3 验证记录与真实数据抽样结果 |
+| [高保留模式总方案 (`docs/ambient-compact-plan.md`)](docs/ambient-compact-plan.md) | 初版水位状态机设计与 P0–P1 实施记录 |
 | [兼容性说明 (`docs/compatibility.md`)](docs/compatibility.md) | 支持的 Pi 版本、公开 API 与 [Codemode](docs/compatibility.md#codemode) 兼容性 |
 | [安全说明 (`SECURITY.md`)](SECURITY.md) | 本地归档目录、远程模型调用路由与凭据隔离原则 |
 

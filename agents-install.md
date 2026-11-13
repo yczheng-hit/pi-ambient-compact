@@ -2,7 +2,7 @@
 
 This is the canonical procedure for Codex, Claude Code, Pi, and other coding agents that install, configure, or validate `pi-ambient-compact` (built on SoL-Pi and inspired by Live Compact) from a full source checkout. Follow the phases in order. Explicit user instructions take precedence. An extracted npm package is not a substitute for the checkout because it does not contain the test suite.
 
-Installation and configuration are complete only when Pi remains unmodified, the repository checks pass, Pi lists the package, one effective `sol-pi.json` matches the selected configuration profile, and Pi starts without an extension error. With the default `all-enabled` profile, all four upstream mechanisms are enabled. With the `live-compact` profile, Ambient Compact (`liveCompact`, supporting `dynamic-ai` and `local-tools` strategies) is enabled and Pi registers its `/ambient-compact` (and alias `/live-compact`) command.
+Installation and configuration are complete only when Pi remains unmodified, the repository checks pass, Pi lists the package, one effective `sol-pi.json` matches the selected configuration profile, and Pi starts without an extension error. With the default `all-enabled` profile, all four upstream mechanisms are enabled. With the `live-compact` profile, Ambient Compact (`liveCompact`, supporting `dynamic-ai` and `local-tools` strategies) is enabled and Pi registers its `/ambient-compact` command.
 
 ## Rules
 
@@ -206,7 +206,7 @@ Report:
 - install scope and the exact entry shown by `pi list`;
 - configuration profile;
 - effective config path, four enabled flags, EPR reducer provider/model, and `cacheWriteReadRatio`, without secrets;
-- for `live-compact`: the effective `liveCompact` strategy, thresholds, protection, and summary/verification routes, and whether `/ambient-compact` (and `/live-compact`) was registered;
+- for `live-compact`: the effective `liveCompact` strategy, thresholds, protection, and summary/verification routes, and whether `/ambient-compact` was registered;
 - every validation command and result;
 - any blocker or deviation.
 

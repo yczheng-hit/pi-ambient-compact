@@ -298,7 +298,7 @@ export function settingsMenu(options: SettingsMenuOptions): SettingsMenuFactory<
 			failed = false;
 			saveAbort = new AbortController();
 			const { signal } = saveAbort;
-			notice = "Running Live Compact maintenance cycle…";
+			notice = "Running Ambient Compact maintenance cycle…";
 			tui.requestRender();
 			try {
 				notice = await options.runNow(signal);

@@ -58,8 +58,8 @@ All mechanisms ship in the standalone `pi-ambient-compact` package and compose t
 
 | Module | Strategy / Tool / Command | Description |
 |---|---|---|
-| **Ambient Compact (`dynamic-ai`)** | `/ambient-compact` (alias `/live-compact`), `context_recall` | **Global AI Selective Compaction (Recommended)**: maintains context in the 30%–70% golden band by indexing completed episodes and tool-round runs, generating and verifying summaries through `summary` + `verification` routes, and archiving originals for `context_recall`. |
-| **Ambient Compact (`local-tools`)** | `/ambient-compact` (alias `/live-compact`), `obs_recall` | **Zero-Model Local Condensing**: replaces the oldest >10KiB pure-text successful tool outputs with deterministic head+tail excerpt cards (default 8KiB) when pressure crosses the ceiling. |
+| **Ambient Compact (`dynamic-ai`)** | `/ambient-compact`, `context_recall` | **Global AI Selective Compaction (Recommended)**: maintains context in the 30%–70% golden band by indexing completed episodes and tool-round runs, generating and verifying summaries through `summary` + `verification` routes, and archiving originals for `context_recall`. |
+| **Ambient Compact (`local-tools`)** | `/ambient-compact`, `obs_recall` | **Zero-Model Local Condensing**: replaces the oldest >10KiB pure-text successful tool outputs with deterministic head+tail excerpt cards (default 8KiB) when pressure crosses the ceiling. |
 | **ObservationPack** | `obs_recall` | Content-addressed archive and paged recall for large text tool outputs; hands projection control to Ambient Compact when enabled while keeping `obs_recall` active. |
 | **Online Context Compact** | `update_plan` | Registers `update_plan` for structured working plans; disables price-driven native compaction when Ambient Compact is active. |
 | **Action Fusion** | `edit` / `write` (`then_run`) | Adds optional `then_run` validation commands to `edit` and `write`, preserving tool activation states set by `pi-hashline-edit-pro` or `pi-openai-codex-compat` (`apply_patch`). |
@@ -71,7 +71,7 @@ All mechanisms ship in the standalone `pi-ambient-compact` package and compose t
 
 ### 1. Interactive TUI Settings Pane (`/ambient-compact`)
 
-In Pi TUI mode, run **`/ambient-compact`** (or `/ambient-compact settings`, alias `/live-compact`) to open the interactive settings pane modeled after `/codex-settings`:
+In Pi TUI mode, run **`/ambient-compact`** (or `/ambient-compact settings`) to open the interactive settings pane modeled after `/codex-settings`:
 
 - **Instant search**: type to filter settings by label, key, or description.
 - **Configurable fields**:

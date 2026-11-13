@@ -33,10 +33,10 @@ export class RouteUnavailableError extends Error {
 export function resolveRoute(ctx: ExtensionContext, route: LiveCompactModelRoute): Model<Api> {
 	if (route.provider !== undefined && route.model !== undefined) {
 		const model = (ctx.modelRegistry as unknown as Registry).find?.(route.provider, route.model);
-		if (!model) throw new RouteUnavailableError(`Live Compact model route is unavailable: ${route.provider}/${route.model}`);
+		if (!model) throw new RouteUnavailableError(`Ambient Compact model route is unavailable: ${route.provider}/${route.model}`);
 		return model;
 	}
-	if (!ctx.model) throw new RouteUnavailableError("Live Compact has no working model to follow");
+	if (!ctx.model) throw new RouteUnavailableError("Ambient Compact has no working model to follow");
 	return ctx.model as Model<Api>;
 }
 
@@ -54,7 +54,7 @@ function operationSignal(parent: AbortSignal, timeoutMs: number): { readonly sig
 	const relay = () => controller.abort(parent.reason);
 	if (parent.aborted) relay();
 	else parent.addEventListener("abort", relay, { once: true });
-	const timer = setTimeout(() => controller.abort(new DOMException("Live Compact model call timed out", "AbortError")), timeoutMs);
+	const timer = setTimeout(() => controller.abort(new DOMException("Ambient Compact model call timed out", "AbortError")), timeoutMs);
 	return {
 		signal: controller.signal,
 		cleanup: () => {

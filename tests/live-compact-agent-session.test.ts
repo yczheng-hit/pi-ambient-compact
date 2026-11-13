@@ -340,7 +340,7 @@ describe("Live Compact feature wiring", () => {
 		const base = { ...DEFAULT_CONFIG, observationPack: true, onlineContextCompact: true };
 		const legacy = register(base);
 		const old = register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true }) }, "0.86.9");
-		expect(old.commands).not.toContain("live-compact");
+		expect(old.commands).not.toContain("ambient-compact");
 		// ObservationPack keeps its context handler; the notice adds one session_start handler.
 		expect(old.events.filter((event) => event === "context").length).toBe(
 			legacy.events.filter((event) => event === "context").length,
@@ -352,7 +352,7 @@ describe("Live Compact feature wiring", () => {
 			legacy.events.filter((event) => event === "session_start").length + 1,
 		);
 		expect(register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true }) }, "0.87.0").commands).toContain(
-			"live-compact",
+			"ambient-compact",
 		);
 	});
 
@@ -360,8 +360,7 @@ describe("Live Compact feature wiring", () => {
 		const base = { ...DEFAULT_CONFIG, observationPack: true, onlineContextCompact: true };
 		const dynamic = register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true, strategy: "dynamic-ai" }) });
 		expect(dynamic.tools).toContain("context_recall");
-		expect(dynamic.commands).toContain("live-compact");
-		expect(dynamic.commands).toContain("ambient-compact");
+		expect(dynamic.commands).toEqual(["ambient-compact"]);
 		for (const event of ["turn_end", "agent_before_settle", "context", "input", "session_before_compact", "model_select"]) {
 			expect(dynamic.events).toContain(event);
 		}
@@ -374,12 +373,11 @@ describe("Live Compact feature wiring", () => {
 		const base = { ...DEFAULT_CONFIG, observationPack: true, onlineContextCompact: true };
 		const legacy = register(base);
 		expect(legacy.events).toContain("context");
-		expect(legacy.commands).not.toContain("live-compact");
+		expect(legacy.commands).not.toContain("ambient-compact");
 
 		const live = register({ ...base, liveCompact: parseLiveCompactConfig({ enabled: true }) });
 		expect(live.tools).toContain("obs_recall");
-		expect(live.commands).toContain("live-compact");
-		expect(live.commands).toContain("ambient-compact");
+		expect(live.commands).toEqual(["ambient-compact"]);
 		// ObservationPack registers no context handler; OCC still observes context for request counts.
 		expect(live.events.filter((event) => event === "context").length).toBe(
 			legacy.events.filter((event) => event === "context").length - 1,

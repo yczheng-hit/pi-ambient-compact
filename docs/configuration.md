@@ -108,7 +108,7 @@ Requirements:
 | `limits.batchBudgetMs` | `50` | Cooperative time budget for one boundary's condensing. |
 | `budget.extraReserveTokens` | `0` | Extra input reserve on top of the automatic output reserve and margin. |
 
-Ratios are fractions (`0.7` is 70%) and must satisfy `0 < targetRatio <= startRatio < ceilingRatio < 1`. The safe input limit is the model window minus an output reserve (the model's `maxTokens`, at most 32,768 tokens and at most a quarter of the window), minus a 2% margin, minus `extraReserveTokens`. When Pi's auto-compaction is on, the levels must also stay under Pi's own compaction threshold, which is the window minus Pi's effective `compaction.reserveTokens` minus the same margin. Otherwise Pi's native compaction would run first, which matters for windows under about 82K tokens with Pi's default 16,384 reserve. If the configured ceiling exceeds the lower of the two limits, all levels are scaled down proportionally, and `/live-compact` says which limit applied. Right after Live Compact writes cards, Pi checks its own uncalibrated estimate instead of the provider's usage, so Live Compact keeps condensing eligible results until that estimate also fits under Pi's threshold. Unknown keys and invalid values are fatal, in both the runtime loader and `scripts/check-sol-pi-config.mjs`, which share one schema. The full schema, including the `summary`, `verification`, `background`, and remaining `limits` fields reserved for later stages, is in `docs/live-compact-config-plan.md` in the SoL-Pi repository.
+Ratios are fractions (`0.7` is 70%) and must satisfy `0 < targetRatio <= startRatio < ceilingRatio < 1`. The safe input limit is the model window minus an output reserve (the model's `maxTokens`, at most 32,768 tokens and at most a quarter of the window), minus a 2% margin, minus `extraReserveTokens`. When Pi's auto-compaction is on, the levels must also stay under Pi's own compaction threshold, which is the window minus Pi's effective `compaction.reserveTokens` minus the same margin. Otherwise Pi's native compaction would run first, which matters for windows under about 82K tokens with Pi's default 16,384 reserve. If the configured ceiling exceeds the lower of the two limits, all levels are scaled down proportionally, and `/ambient-compact` says which limit applied. Right after Live Compact writes cards, Pi checks its own uncalibrated estimate instead of the provider's usage, so Live Compact keeps condensing eligible results until that estimate also fits under Pi's threshold. Unknown keys and invalid values are fatal, in both the runtime loader and `scripts/check-sol-pi-config.mjs`, which share one schema. The full schema, including the `summary`, `verification`, `background`, and remaining `limits` fields reserved for later stages, is in `docs/ambient-compact-config-plan.md` in the SoL-Pi repository.
 
 These results are never condensed:
 
@@ -131,11 +131,11 @@ Current limits of this build:
 
 To validate a Live Compact profile, run `node scripts/check-sol-pi-config.mjs --config <file> --require-live-compact`. It fails unless `liveCompact.enabled` is `true`, and it cannot be combined with `--require-all-enabled`. [`sol-pi.live-compact.example.json`](../sol-pi.live-compact.example.json) is a ready profile.
 
-`/live-compact` shows the current levels, the context before and after the last boundary, condensed counts, calibration, and any shortfall. Decisions are logged without tool content to `live-compact/ledger.jsonl` under SoL-Pi's session-derived runtime directory. Configuration is read at extension startup; restart Pi after changing it. Condensed cards already in the session keep their content, and new settings apply to later decisions.
+`/ambient-compact` shows the current levels, the context before and after the last boundary, condensed counts, calibration, and any shortfall. Decisions are logged without tool content to `live-compact/ledger.jsonl` under SoL-Pi's session-derived runtime directory. Configuration is read at extension startup; restart Pi after changing it. Condensed cards already in the session keep their content, and new settings apply to later decisions.
 
 ### dynamic-ai strategy (experimental)
 
-`"strategy": "dynamic-ai"` replaces tool-result condensing with global maintenance cycles driven by an AI planner. It is opt-in. Without `strategy`, Live Compact keeps the `local-tools` behavior above. The design and its verification are in `docs/live-compact-dynamic-plan.md` in the SoL-Pi repository. It has passed automated tests only; comparisons against real providers (stage G4) are still pending.
+`"strategy": "dynamic-ai"` replaces tool-result condensing with global maintenance cycles driven by an AI planner. It is opt-in. Without `strategy`, Live Compact keeps the `local-tools` behavior above. The design and its verification are in `docs/ambient-compact-dynamic-plan.md` in the SoL-Pi repository. It has passed automated tests only; comparisons against real providers (stage G4) are still pending.
 
 ```json
 {
@@ -190,7 +190,7 @@ Safety does not depend on a cycle succeeding:
 - **Oversized input.** An input that would not fit first gets an immediate maintenance cycle. If it still does not fit, it is not sent; shorten it, or run `/compact`.
 - **Pi's own compaction.** Live Compact cancels Pi's threshold compaction while the request fits the safe limit. Overflow recovery and manual `/compact` are unchanged. If another extension that compacts loads before SoL-Pi, such as pi-compaction-guidance, that extension still does its work before the cancel.
 - **Interrupted batches.** A batch cut short by a crash or I/O failure is completed at the next boundary. The request before that boundary already carries the remaining edits, applied in memory.
-- **No lock at the limit.** At or above `ceilingRatio`, a failed cycle is retried after two minutes without waiting for growth, and at once after the summary or verification model changes. `/live-compact now` runs a cycle immediately. Pi's built-in `/compact` stays available in every state.
+- **No lock at the limit.** At or above `ceilingRatio`, a failed cycle is retried after two minutes without waiting for growth, and at once after the summary or verification model changes. `/ambient-compact now` runs a cycle immediately. Pi's built-in `/compact` stays available in every state.
 
 The summary and verification routes receive the selected history segments, with Pi-managed authentication. Choose routes whose provider may see that history.
 
@@ -203,7 +203,7 @@ Not yet covered:
 
 Model calls are bounded. The candidate pool is capped at 150,000 real tokens, and both the pool and the route window are measured in real tokens, using the session's calibration against provider usage, so a route is never sent more than its window holds. A rate limit, overload, 5xx error, or timeout is retried twice within the cycle, after 5 and 15 seconds.
 
-**Interactive TUI settings pane and commands.** In TUI mode, `/live-compact` (with no arguments) or `/live-compact settings` opens an interactive settings pane with the same interaction contract as `/codex-settings`:
+**Interactive TUI settings pane and commands.** In TUI mode, `/ambient-compact` (with no arguments) or `/ambient-compact settings` opens an interactive settings pane with the same interaction contract as `/codex-settings`:
 
 - **Enter** changes the selected value or opens its picker/input editor (model routes from `ctx.modelRegistry` or custom `provider/model`, water-level percentages, protection counts, maintenance cooldown/savings/timeouts, and observation sizes). It never implicitly saves.
 - **Space** activates a result or inserts a space when search has focus.
@@ -220,16 +220,16 @@ Subcommands remain available in both TUI and non-TUI modes:
 
 | Command | Effect |
 |---|---|
-| `/live-compact` or `/live-compact settings` | Open the interactive TUI settings pane (in non-TUI mode, `/live-compact` prints status). |
-| `/live-compact status` | Levels, the routes in effect and where each comes from, the last boundary, and the last cycle. |
-| `/live-compact now` | Run a cycle immediately, without the cooldown, backoff, or minimum-savings checks. It needs no boundary: the batch applies to the next request and is persisted at the following boundary. |
-| `/live-compact model` | Show the summary and verification routes in effect. |
-| `/live-compact model summary <provider>/<model>` | Use that model for summaries in this session only. Use `verification` for the checker. The model id may contain slashes, for example `nvidia-inference/nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017`. |
-| `/live-compact model summary default` | Clear this session's override. |
+| `/ambient-compact` or `/ambient-compact settings` | Open the interactive TUI settings pane (in non-TUI mode, `/ambient-compact` prints status). |
+| `/ambient-compact status` | Levels, the routes in effect and where each comes from, the last boundary, and the last cycle. |
+| `/ambient-compact now` | Run a cycle immediately, without the cooldown, backoff, or minimum-savings checks. It needs no boundary: the batch applies to the next request and is persisted at the following boundary. |
+| `/ambient-compact model` | Show the summary and verification routes in effect. |
+| `/ambient-compact model summary <provider>/<model>` | Use that model for summaries in this session only. Use `verification` for the checker. The model id may contain slashes, for example `nvidia-inference/nvidia/deepseek-ai/eccn-deepseek-v4.1-flash-1017`. |
+| `/ambient-compact model summary default` | Clear this session's override. |
 | `... --global` | Write the route, or with `default` remove it, in the effective `sol-pi.json`. The whole file is validated first and then replaced atomically; other settings and route options are kept. |
 
-A model that Pi has not registered is refused and nothing changes. For each setting, a session override takes precedence over the global/project default in `sol-pi.json`, which takes precedence over the configuration loaded at startup. The global/project file is re-read whenever its content changes on disk, so a saved change made in one session applies to every running session from its next cycle, without a restart. If the file becomes invalid, the last valid settings stay in use and `/live-compact` reports the error.
-`/live-compact` shows the levels, the last boundary, and the last cycle. Cycles are logged without message content to `live-compact/ledger.jsonl`.
+A model that Pi has not registered is refused and nothing changes. For each setting, a session override takes precedence over the global/project default in `sol-pi.json`, which takes precedence over the configuration loaded at startup. The global/project file is re-read whenever its content changes on disk, so a saved change made in one session applies to every running session from its next cycle, without a restart. If the file becomes invalid, the last valid settings stay in use and `/ambient-compact` reports the error.
+`/ambient-compact` shows the levels, the last boundary, and the last cycle. Cycles are logged without message content to `live-compact/ledger.jsonl`.
 
 ## Pi integration
 

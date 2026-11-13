@@ -407,13 +407,13 @@ describe("dynamic-ai with the AI planner through Pi's model registry", () => {
 });
 
 describe("dynamic-ai commands and recovery at the limit", () => {
-	it("/live-compact now commits a batch that the next request already uses, then persists it", async () => {
+	it("/ambient-compact now commits a batch that the next request already uses, then persists it", async () => {
 		const run = await session({ live: { protection: { keepRecentToolRounds: 1 } } });
 		try {
 			await run.prompt("task A", [...dumps("a", 3), fauxAssistantMessage("A done")]);
 			await run.prompt("task B", [fauxAssistantMessage("B done")]);
 			expect(run.reports.every((report) => report.outcome === "skipped")).toBe(true);
-			await run.prompt("/live-compact now", []);
+			await run.prompt("/ambient-compact now", []);
 			const manual = run.reports.at(-1)!;
 			expect(manual).toMatchObject({ boundary: "command", outcome: "committed" });
 			expect(findIncompleteBatches(run.sessionManager.getBranch())).toHaveLength(1);
@@ -464,7 +464,7 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 		}
 	});
 
-	it("retries at once after the summary route is changed with /live-compact model", async () => {
+	it("retries at once after the summary route is changed with /ambient-compact model", async () => {
 		const routesSeen: string[] = [];
 		const failing: Planner = async (request) => {
 			routesSeen.push(`${request.routes?.summary.provider ?? "working"}/${request.routes?.summary.model ?? "model"}`);
@@ -476,12 +476,12 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			const before = routesSeen.length;
 			expect(before).toBeGreaterThan(0);
 			const summaryRoute = `dyn-${runs}-summary/dyn-${runs}-summary-model`;
-			await run.prompt(`/live-compact model summary ${summaryRoute}`, []);
+			await run.prompt(`/ambient-compact model summary ${summaryRoute}`, []);
 			await run.prompt("task D", [dump("d1", 1), fauxAssistantMessage("D done")]);
 			expect(routesSeen.length).toBe(before + 1);
 			expect(routesSeen.at(-1)).toBe(summaryRoute);
 			// An unknown model is refused and changes nothing.
-			await run.prompt("/live-compact model summary nowhere/none", []);
+			await run.prompt("/ambient-compact model summary nowhere/none", []);
 			await run.prompt("task E", [dump("e1", 1), fauxAssistantMessage("E done")]);
 			expect(routesSeen.at(-1)).toBe(summaryRoute);
 		} finally {
@@ -502,7 +502,7 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 		const other = await session({ cwd, configPath, planner: watching, live: { maintenance: { cooldownRequests: 0, retryGrowthRatio: 0 } } });
 		try {
 			const route = `dyn-${runs - 1}-summary/dyn-${runs - 1}-summary-model`;
-			await writer.prompt(`/live-compact model summary ${route} --global`, []);
+			await writer.prompt(`/ambient-compact model summary ${route} --global`, []);
 			const written = JSON.parse(await readFile(configPath, "utf8"));
 			expect(written.liveCompact.summary).toEqual({ provider: `dyn-${runs - 1}-summary`, model: `dyn-${runs - 1}-summary-model` });
 			expect(written.liveCompact.strategy).toBe("dynamic-ai");

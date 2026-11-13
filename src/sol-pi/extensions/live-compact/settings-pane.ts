@@ -296,6 +296,6 @@ export async function openLiveCompactSettingsPane(
 			}),
 		);
 	} catch (error) {
-		ctx.ui.notify(error instanceof Error ? error.message : "Could not open Live Compact settings.", "error");
+		ctx.ui.notify(error instanceof Error ? error.message : "Could not open Ambient Compact settings.", "error");
 	}
 }
