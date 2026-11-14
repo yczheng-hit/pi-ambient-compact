@@ -601,7 +601,8 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			// Task C crosses the 70% start threshold and triggers a background cycle, but prompt() returns immediately!
 			await run.prompt("task C", [...dumps("c", 5), fauxAssistantMessage("C done")]);
 			await plannerStarted;
-			// Foreground prompt is already settled while the background planner is still waiting on plannerGate!
+			// A concurrent prompt runs and finishes WHILE the background planner is still waiting on plannerGate!
+			await run.prompt("concurrent turn while bg cycle runs", [dump("d1", 2), fauxAssistantMessage("D done")]);
 			allowPlannerFinish();
 			await new Promise((resolve) => setTimeout(resolve, 30));
 			expect(run.reports.some((r) => r.outcome === "committed")).toBe(true);
@@ -612,6 +613,7 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			const lastReq = run.requests.at(-1)!;
 			expect(textOf(lastReq)).toContain("Live Compact history summary v1");
 			expect(textOf(lastReq)).not.toContain("a1 line 0000");
+			expect(textOf(lastReq)).toContain("d1 line 0000");
 			expect(findIncompleteBatches(run.sessionManager.getBranch())).toEqual([]);
 		} finally {
 			await run.dispose();

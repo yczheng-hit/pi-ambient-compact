@@ -579,24 +579,16 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		};
 
 		const boundary = async (trigger: "turn_end" | "agent_before_settle", event: BoundaryEvent, ctx: ExtensionContext) => {
-			if (!hasBoundaryApi(event) || event.outcome !== "completed" || running) return;
+			if (!hasBoundaryApi(event) || event.outcome !== "completed") return;
 			const branch = ctx.sessionManager.getBranch();
-
-			// Finish an interrupted or out-of-boundary batch before anything else.
-			const incomplete = findIncompleteBatches(branch);
-			if (incomplete.length > 0) {
-				await record(ctx, { event: "batch_completed", batches: incomplete.map((batch) => batch.batchId) });
-				return { entries: [...event.entries, ...incomplete.flatMap(completionDrafts)] };
-			}
-
 			const currentLevels = levelsFor(ctx);
-			if (!currentLevels) return;
-			levels = currentLevels;
-			const projected = measure(event);
-			lastAfter = projected;
+			if (currentLevels) {
+				levels = currentLevels;
+				lastAfter = measure(event);
+			}
 			const admit = (after: number) => {
 				// A mid-run request that cannot fit is not sent.
-				if (trigger === "turn_end" && after > currentLevels.safeInputLimit) {
+				if (currentLevels && trigger === "turn_end" && after > currentLevels.safeInputLimit) {
 					notify(
 						ctx,
 						`Ambient Compact: the context (${percent(after, currentLevels.contextWindow)}) is above the safe input limit and could not be reduced; the run is paused. Run /ambient-compact now (optionally after /ambient-compact model summary <provider>/<model>) or /compact.`,
@@ -605,6 +597,23 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					ctx.abort();
 				}
 			};
+
+			// Finish an interrupted or out-of-boundary batch before anything else.
+			const incomplete = findIncompleteBatches(branch);
+			if (incomplete.length > 0) {
+				await record(ctx, { event: "batch_completed", batches: incomplete.map((batch) => batch.batchId) });
+				if (lastAfter !== undefined) admit(lastAfter);
+				showBarStatus(ctx);
+				return { entries: [...event.entries, ...incomplete.flatMap(completionDrafts)] };
+			}
+
+			if (!currentLevels || lastAfter === undefined) return;
+			const projected = lastAfter;
+			if (running) {
+				showBarStatus(ctx);
+				admit(projected);
+				return;
+			}
 
 			// When within safeInputLimit and backgroundCycles is enabled, run the cycle asynchronously
 			// without awaiting it in the boundary hook, so the foreground turn settles in <1ms and
@@ -633,6 +642,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 							return;
 						}
 						const begin = bgResult.batch[0];
+						let stateToWrite = bgResult.state;
+						let reportToWrite = bgResult.report;
 						if (bgResult.outcome === "committed" && begin?.type === "custom") {
 							const currentBranch = ctx.sessionManager.getBranch();
 							const branchIds = new Set(currentBranch.map((entry) => entry.id));
@@ -644,12 +655,26 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 								(edit) => branchIds.has(edit.targetId) && !alreadyEditedIds.has(edit.targetId),
 							);
 							if (stillValid) {
+								const reclaimed = Math.max(0, projected - bgResult.after);
 								pi.appendEntry(begin.customType, begin.data);
-								lastAfter = bgResult.after;
+								lastAfter = Math.max(0, (lastAfter ?? projected) - reclaimed);
+							} else {
+								stateToWrite = {
+									...bgResult.state,
+									outcome: "invalid",
+									reclaimed: 0,
+									note: "target entries changed while background cycle ran",
+								};
+								reportToWrite = {
+									...bgResult.report,
+									outcome: "invalid",
+									after: lastAfter ?? projected,
+									reason: "target entries changed while background cycle ran",
+								};
 							}
 						}
-						pi.appendEntry(DYNAMIC_STATE_ENTRY, bgResult.state);
-						report(bgResult.report);
+						pi.appendEntry(DYNAMIC_STATE_ENTRY, stateToWrite);
+						report(reportToWrite);
 					} finally {
 						if (bgAbort === controller) bgAbort = undefined;
 						running = false;
