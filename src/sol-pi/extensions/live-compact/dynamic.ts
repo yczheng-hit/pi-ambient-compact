@@ -224,6 +224,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		let noGain: { readonly projected: number } | undefined;
 		let running = false;
 		let bgAbort: AbortController | undefined;
+		let activeBgPromise: Promise<void> | undefined;
 		const routeStore = new RouteStore(config);
 		const configResolver = new LiveCompactConfigResolver(config);
 		const ledgers = new Map<string, Ledger>();
@@ -251,6 +252,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		const reset = (): void => {
 			bgAbort?.abort();
 			bgAbort = undefined;
+			activeBgPromise = undefined;
+			running = false;
 			calibration = undefined;
 			lastAfter = undefined;
 			noGain = undefined;
@@ -608,8 +611,20 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			}
 
 			if (!currentLevels || lastAfter === undefined) return;
-			const projected = lastAfter;
+			let projected = lastAfter;
 			if (running) {
+				// If a concurrent turn crosses the hard safeInputLimit while a background cycle is in
+				// flight, wait for that background cycle to finish before deciding whether to abort.
+				if (trigger === "turn_end" && projected > currentLevels.safeInputLimit && activeBgPromise) {
+					await activeBgPromise;
+					const nowIncomplete = findIncompleteBatches(ctx.sessionManager.getBranch());
+					if (nowIncomplete.length > 0 && lastAfter <= currentLevels.safeInputLimit) {
+						await record(ctx, { event: "batch_completed", batches: nowIncomplete.map((b) => b.batchId) });
+						showBarStatus(ctx);
+						return { entries: [...event.entries, ...nowIncomplete.flatMap(completionDrafts)] };
+					}
+					projected = lastAfter ?? projected;
+				}
 				showBarStatus(ctx);
 				admit(projected);
 				return;
@@ -624,7 +639,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				const controller = new AbortController();
 				bgAbort = controller;
 				running = true;
-				void (async () => {
+				activeBgPromise = (async () => {
 					try {
 						const bgResult = await runCycle(
 							ctx,
@@ -676,9 +691,12 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						pi.appendEntry(DYNAMIC_STATE_ENTRY, stateToWrite);
 						report(reportToWrite);
 					} finally {
-						if (bgAbort === controller) bgAbort = undefined;
-						running = false;
-						showBarStatus(ctx);
+						if (bgAbort === controller) {
+							bgAbort = undefined;
+							activeBgPromise = undefined;
+							running = false;
+							showBarStatus(ctx);
+						}
 					}
 				})();
 				return;

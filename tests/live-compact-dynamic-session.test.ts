@@ -598,11 +598,11 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 		try {
 			await run.prompt("task A", [...dumps("a", 4), fauxAssistantMessage("A done")]);
 			await run.prompt("task B", [...dumps("b", 4), fauxAssistantMessage("B done")]);
-			// Task C crosses the 70% start threshold and triggers a background cycle, but prompt() returns immediately!
-			await run.prompt("task C", [...dumps("c", 5), fauxAssistantMessage("C done")]);
+			// Task C crosses the 70% start threshold (~15,200 >= 14,000, <= 18,576 safeInputLimit) and triggers a background cycle, while prompt() returns immediately!
+			await run.prompt("task C", [...dumps("c", 2), fauxAssistantMessage("C done")]);
 			await plannerStarted;
 			// A concurrent prompt runs and finishes WHILE the background planner is still waiting on plannerGate!
-			await run.prompt("concurrent turn while bg cycle runs", [dump("d1", 2), fauxAssistantMessage("D done")]);
+			await run.prompt("concurrent turn while bg cycle runs", [dump("d1", 1), fauxAssistantMessage("D done")]);
 			allowPlannerFinish();
 			await new Promise((resolve) => setTimeout(resolve, 30));
 			expect(run.reports.some((r) => r.outcome === "committed")).toBe(true);
