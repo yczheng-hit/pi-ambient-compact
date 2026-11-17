@@ -117,6 +117,7 @@ describe("Live Compact configuration", () => {
 		// The default target stays strictly below a lower configured start across the entire (0, 1) range.
 		expect(parseLiveCompactConfig({ strategy: "dynamic-ai", thresholds: { startRatio: 0.4, ceilingRatio: 0.6 } }).thresholds.targetRatio).toBe(0.35);
 		expect(parseLiveCompactConfig({ thresholds: { startRatio: 0.05, ceilingRatio: 0.1 } }).thresholds.targetRatio).toBe(0.025);
+		expect(parseLiveCompactConfig({ thresholds: { startRatio: 0.05001, ceilingRatio: 0.1 } }).thresholds.targetRatio).toBeCloseTo(0.025005, 8);
 		expect(parseLiveCompactConfig({ thresholds: { startRatio: 0.01, ceilingRatio: 0.02 } }).thresholds.targetRatio).toBe(0.005);
 		expect(parseLiveCompactConfig({ thresholds: { startRatio: 0.005, ceilingRatio: 0.01 } }).thresholds.targetRatio).toBe(0.0025);
 		expect(parseLiveCompactConfig({ enabled: true }).thresholds.targetRatio).toBe(0.5);

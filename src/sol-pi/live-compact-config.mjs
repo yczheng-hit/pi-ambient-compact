@@ -155,19 +155,19 @@ export function parseLiveCompactConfig(value) {
 		result[group] = parsed;
 	}
 	const config = result;
-	// When targetRatio is omitted, keep it strictly below startRatio: 0.5 above 0.5, start - 0.05 in (0.05, 0.5], and start / 2 in (0, 0.05].
+	// When targetRatio is omitted, keep it strictly below startRatio: 0.5 above 0.5, start - 0.05 in (0.1, 0.5], and start / 2 in (0, 0.1].
 	if (!(isRecord(value.thresholds) && Object.hasOwn(value.thresholds, "targetRatio"))) {
 		const start = config.thresholds.startRatio;
 		const fallbackTarget =
 			start > DYNAMIC_DEFAULT_TARGET_RATIO
 				? DYNAMIC_DEFAULT_TARGET_RATIO
-				: start > 0.05
-					? Number((start - 0.05).toFixed(4))
+				: start > 0.1
+					? Number((start - 0.05).toFixed(6))
 					: start / 2;
 		config.thresholds = { ...config.thresholds, targetRatio: fallbackTarget };
 	}
 	const { startRatio, targetRatio, ceilingRatio } = config.thresholds;
-	if (!(targetRatio <= startRatio && startRatio < ceilingRatio)) {
+	if (!(targetRatio > 0 && targetRatio <= startRatio && startRatio < ceilingRatio)) {
 		throw new Error("liveCompact.thresholds must satisfy 0 < targetRatio <= startRatio < ceilingRatio < 1 " +
 			`(got target ${targetRatio}, start ${startRatio}, ceiling ${ceilingRatio})`);
 	}
