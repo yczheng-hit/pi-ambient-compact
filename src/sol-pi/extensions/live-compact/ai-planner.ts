@@ -204,12 +204,35 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 		let calls = 0;
 		let inputTokens = 0;
 		let outputTokens = 0;
-		const call = async (model: Model<Api>, system: string, prompt: string, maxTokens: number, timeoutMs: number): Promise<CompletionResult> => {
+		const call = async (
+			model: Model<Api>,
+			routeCall: LiveCompactCallConfig,
+			system: string,
+			prompt: string,
+			initialMaxTokens: number,
+		): Promise<CompletionResult> => {
+			let currentMaxTokens = initialMaxTokens;
+			let lengthRetried = false;
 			for (let retry = 0; ; retry += 1) {
 				calls += 1;
-				const result = await complete(ctx, model, { system, prompt, maxTokens, signal: request.signal, timeoutMs });
+				const result = await complete(ctx, model, {
+					system,
+					prompt,
+					maxTokens: currentMaxTokens,
+					signal: request.signal,
+					timeoutMs: routeCall.timeoutMs,
+				});
 				inputTokens += result.inputTokens;
 				outputTokens += result.outputTokens;
+				if (result.stopReason === "length" && !lengthRetried && calls < maxCalls) {
+					const boosted = outputBudget(routeCall, model, Math.max(currentMaxTokens * 2, 32_768));
+					if (boosted > currentMaxTokens) {
+						lengthRetried = true;
+						currentMaxTokens = boosted;
+						notes.push(`output hit length limit (${ initialMaxTokens } tokens), retrying with ${boosted} tokens`);
+						continue;
+					}
+				}
 				if (!isTransientFailure(result) || retry >= TRANSIENT_RETRIES) return result;
 				notes.push(`transient failure, retrying: ${(result.errorMessage ?? "").slice(0, 120)}`);
 				await sleep(RETRY_DELAYS_MS[retry] ?? 15_000, request.signal);
@@ -220,7 +243,8 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 		const summaryModel = resolveRoute(ctx, routes.summary);
 		const verifyModel = resolveRoute(ctx, routes.verification);
 		const wanted = request.candidates.reduce((sum, segment) => sum + summaryCap(segment), 0) + 2_000;
-		const generationTokens = outputBudget(routes.summary, summaryModel, wanted);
+		const generationFloor = Math.min(16_384, Math.floor(summaryModel.contextWindow * 0.2));
+		const generationTokens = outputBudget(routes.summary, summaryModel, Math.max(wanted, generationFloor));
 		const overhead = estimateTextTokens(GENERATE_SYSTEM) + estimateTextTokens(request.userTurns.join("\n")) + 500;
 		const candidates = fitCandidates(request.candidates, summaryModel, overhead, generationTokens, ratio);
 		if (candidates.length < request.candidates.length) notes.push(`${request.candidates.length - candidates.length} candidate(s) did not fit the summary model`);
@@ -233,10 +257,10 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 		for (let attempt = 0; attempt <= maxRegenerations && pending.length > 0 && calls + 2 <= maxCalls; attempt += 1) {
 			const generated = await call(
 				summaryModel,
+				routes.summary,
 				GENERATE_SYSTEM,
 				generatePrompt(pending, request.userTurns, request.reclaimTokens, feedback),
 				generationTokens,
-				routes.summary.timeoutMs,
 			);
 			if (!generated.ok) {
 				failure = `generation stopped: ${generated.stopReason}${generated.errorMessage ? ` (${generated.errorMessage.slice(0, 300)})` : ""}`;
@@ -252,7 +276,14 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 				notes.push("selected segments do not fit the verification model");
 				break;
 			}
-			const verified = await call(verifyModel, VERIFY_SYSTEM, verifyText, outputBudget(routes.verification, verifyModel, 500 + pairs.length * 200), routes.verification.timeoutMs);
+			const verifyWanted = Math.max(16_384, 2_000 + pairs.length * 500);
+			const verified = await call(
+				verifyModel,
+				routes.verification,
+				VERIFY_SYSTEM,
+				verifyText,
+				outputBudget(routes.verification, verifyModel, verifyWanted),
+			);
 			if (!verified.ok) {
 				failure = `verification stopped: ${verified.stopReason}${verified.errorMessage ? ` (${verified.errorMessage.slice(0, 300)})` : ""}`;
 				break;
