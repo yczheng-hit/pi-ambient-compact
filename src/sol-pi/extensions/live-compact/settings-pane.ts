@@ -213,6 +213,27 @@ export interface OpenLiveCompactSettingsOptions {
 	readonly configPathOverride?: (ctx: ExtensionContext) => string | undefined;
 }
 
+/**
+ * Enforce strict `target < start < urgent` (`0 < targetPercent < startPercent < ceilingPercent < 100`)
+ * in the settings pane so urgent is always strictly greater than the other two and target is always
+ * strictly smaller than the other two.
+ */
+export function validateSettingsThresholds(values: SettingValues, fallback?: SettingValues): void {
+	const target = Number(values.targetPercent ?? fallback?.targetPercent);
+	const start = Number(values.startPercent ?? fallback?.startPercent);
+	const ceiling = Number(values.ceilingPercent ?? fallback?.ceilingPercent);
+	if (
+		!Number.isFinite(target) ||
+		!Number.isFinite(start) ||
+		!Number.isFinite(ceiling) ||
+		!(target > 0 && target < start && start < ceiling && ceiling < 100)
+	) {
+		throw new Error(
+			`Invalid thresholds: target (${target}%) must be < start (${start}%) < urgent (${ceiling}%)`,
+		);
+	}
+}
+
 export function canOpenSettingsTui(ctx: ExtensionContext): boolean {
 	const cmdCtx = ctx as Partial<ExtensionCommandContext>;
 	return cmdCtx.mode === "tui" && typeof (cmdCtx.ui as { custom?: unknown } | undefined)?.custom === "function";
@@ -260,8 +281,10 @@ export async function openLiveCompactSettingsPane(
 					const start = Number(values.startPercent ?? currentValues.startPercent);
 					const target = Number(values.targetPercent ?? currentValues.targetPercent);
 					const ceiling = Number(values.ceilingPercent ?? currentValues.ceilingPercent);
-					if (!(target < start && start < ceiling)) {
-						return `Invalid thresholds: target (${target}%) must be < start (${start}%) < urgent (${ceiling}%)`;
+					try {
+						validateSettingsThresholds(values, currentValues);
+					} catch (error) {
+						return error instanceof Error ? error.message : "Invalid thresholds.";
 					}
 					const summary = values.summaryRoute ?? "Working model";
 					const verify = values.verificationRoute ?? "Working model";
@@ -285,14 +308,7 @@ export async function openLiveCompactSettingsPane(
 					if (typeof cmdCtx.isIdle === "function" && !cmdCtx.isIdle()) {
 						throw new Error("Pi is busy. Retry when idle.");
 					}
-					const start = Number(values.startPercent ?? currentValues.startPercent);
-					const target = Number(values.targetPercent ?? currentValues.targetPercent);
-					const ceiling = Number(values.ceilingPercent ?? currentValues.ceilingPercent);
-					if (!(target < start && start < ceiling)) {
-						throw new Error(
-							`Thresholds must satisfy target < start < urgent (got target ${target}%, start ${start}%, urgent ${ceiling}%).`,
-						);
-					}
+					validateSettingsThresholds(values, currentValues);
 					settingValuesToConfig(values, currentConfig);
 				},
 				apply: (values, nextSession) => {

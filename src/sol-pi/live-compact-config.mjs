@@ -20,7 +20,7 @@ export const DYNAMIC_DEFAULT_TARGET_RATIO = 0.5;
 export const DEFAULT_LIVE_COMPACT_CONFIG = deepFreeze({
 	enabled: false,
 	strategy: "local-tools",
-	thresholds: { startRatio: 0.7, targetRatio: 0.7, ceilingRatio: 0.8 },
+	thresholds: { startRatio: 0.7, targetRatio: 0.5, ceilingRatio: 0.8 },
 	protection: { keepRecentToolRounds: 3, minFullRequests: 2 },
 	observation: { minBytes: 10_240, excerptTargetBytes: 8_192 },
 	summary: { maxOutputTokens: "auto", timeoutMs: 120_000 },
@@ -155,9 +155,12 @@ export function parseLiveCompactConfig(value) {
 		result[group] = parsed;
 	}
 	const config = result;
-	// Defaults follow the strategy; an explicitly configured target is always kept.
-	if (config.strategy === "dynamic-ai" && !(isRecord(value.thresholds) && Object.hasOwn(value.thresholds, "targetRatio"))) {
-		config.thresholds = { ...config.thresholds, targetRatio: Math.min(DYNAMIC_DEFAULT_TARGET_RATIO, config.thresholds.startRatio) };
+	// When targetRatio is omitted, keep it strictly below startRatio (default 0.5, or startRatio - 0.05).
+	if (!(isRecord(value.thresholds) && Object.hasOwn(value.thresholds, "targetRatio"))) {
+		const fallbackTarget = config.thresholds.startRatio > DYNAMIC_DEFAULT_TARGET_RATIO
+			? DYNAMIC_DEFAULT_TARGET_RATIO
+			: Number(Math.max(0.01, config.thresholds.startRatio - 0.05).toFixed(4));
+		config.thresholds = { ...config.thresholds, targetRatio: fallbackTarget };
 	}
 	const { startRatio, targetRatio, ceilingRatio } = config.thresholds;
 	if (!(targetRatio <= startRatio && startRatio < ceilingRatio)) {

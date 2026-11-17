@@ -98,7 +98,7 @@ describe("Live Compact configuration", () => {
 		expect(DEFAULT_LIVE_COMPACT_CONFIG).toEqual({
 			enabled: false,
 			strategy: "local-tools",
-			thresholds: { startRatio: 0.7, targetRatio: 0.7, ceilingRatio: 0.8 },
+			thresholds: { startRatio: 0.7, targetRatio: 0.5, ceilingRatio: 0.8 },
 			protection: { keepRecentToolRounds: 3, minFullRequests: 2 },
 			observation: { minBytes: 10_240, excerptTargetBytes: 8_192 },
 			summary: { maxOutputTokens: "auto", timeoutMs: 120_000 },
@@ -114,10 +114,9 @@ describe("Live Compact configuration", () => {
 	it("gives dynamic-ai a 0.5 default target and keeps an explicit one", () => {
 		expect(parseLiveCompactConfig({ strategy: "dynamic-ai" }).thresholds).toEqual({ startRatio: 0.7, targetRatio: 0.5, ceilingRatio: 0.8 });
 		expect(parseLiveCompactConfig({ strategy: "dynamic-ai", thresholds: { targetRatio: 0.7 } }).thresholds.targetRatio).toBe(0.7);
-		// The default target never exceeds a lower configured start.
-		expect(parseLiveCompactConfig({ strategy: "dynamic-ai", thresholds: { startRatio: 0.4, ceilingRatio: 0.6 } }).thresholds.targetRatio).toBe(0.4);
-		// local-tools keeps its 0.7 default.
-		expect(parseLiveCompactConfig({ enabled: true }).thresholds.targetRatio).toBe(0.7);
+		// The default target stays strictly below a lower configured start.
+		expect(parseLiveCompactConfig({ strategy: "dynamic-ai", thresholds: { startRatio: 0.4, ceilingRatio: 0.6 } }).thresholds.targetRatio).toBe(0.35);
+		expect(parseLiveCompactConfig({ enabled: true }).thresholds.targetRatio).toBe(0.5);
 	});
 
 	it("merges partial groups with defaults and trims route strings", () => {

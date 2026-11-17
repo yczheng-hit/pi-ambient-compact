@@ -390,7 +390,7 @@ describe("AI planner robustness", () => {
 
 import { Key } from "@earendil-works/pi-tui";
 import { settingsMenu } from "../src/sol-pi/extensions/live-compact/settings-menu.ts";
-import { buildLiveCompactSettingFields } from "../src/sol-pi/extensions/live-compact/settings-pane.ts";
+import { buildLiveCompactSettingFields, validateSettingsThresholds } from "../src/sol-pi/extensions/live-compact/settings-pane.ts";
 import {
 	configToSettingValues,
 	LIVE_COMPACT_SESSION_SETTINGS_TYPE,
@@ -574,12 +574,25 @@ describe("codex-settings style TUI settings menu & store", () => {
 		}
 	});
 
-	it("provides 5% step presets for target/start/urgent and enforces strict target < start < urgent in the settings pane", async () => {
+	it("provides 5% step presets for target/start/urgent and enforces strict target < start < urgent in the settings pane", () => {
 		const fields = buildLiveCompactSettingFields();
 		const expectedSteps = Array.from({ length: 19 }, (_, index) => (index + 1) * 5);
 		for (const id of ["targetPercent", "startPercent", "ceilingPercent"]) {
 			const field = fields.find((candidate) => candidate.id === id);
 			expect(field?.choices).toEqual(expectedSteps);
 		}
+		// Default configuration satisfies strict target < start < urgent out of the box.
+		expect(() => validateSettingsThresholds(configToSettingValues(parseLiveCompactConfig({ enabled: true })))).not.toThrow();
+		expect(() => validateSettingsThresholds({ targetPercent: 50, startPercent: 70, ceilingPercent: 80 })).not.toThrow();
+		// Equal or inverted thresholds are rejected.
+		expect(() => validateSettingsThresholds({ targetPercent: 70, startPercent: 70, ceilingPercent: 80 })).toThrow(
+			/Invalid thresholds: target \(70%\) must be < start \(70%\) < urgent \(80%\)/u,
+		);
+		expect(() => validateSettingsThresholds({ targetPercent: 75, startPercent: 70, ceilingPercent: 80 })).toThrow(
+			/Invalid thresholds: target \(75%\) must be < start \(70%\) < urgent \(80%\)/u,
+		);
+		expect(() => validateSettingsThresholds({ targetPercent: 50, startPercent: 80, ceilingPercent: 80 })).toThrow(
+			/Invalid thresholds: target \(50%\) must be < start \(80%\) < urgent \(80%\)/u,
+		);
 	});
 });

@@ -19,10 +19,10 @@ import { createObservation } from "../src/sol-pi/extensions/observation-pack/obs
 import { DEFAULT_LIVE_COMPACT_CONFIG as DEFAULTS, parseLiveCompactConfig } from "../src/sol-pi/live-compact-config.mjs";
 
 describe("pressure levels", () => {
-	it("derives the default 70/70/80 levels and the safe input limit", () => {
+	it("derives the default 50/70/80 levels and the safe input limit", () => {
 		const levels = pressureLevels(200_000, 8_192, DEFAULTS)!;
 		expect(levels).toMatchObject({ outputReserve: 8_192, safetyMargin: 4_000, safeInputLimit: 187_808 });
-		expect(levels).toMatchObject({ start: 140_000, target: 140_000, ceiling: 160_000, clamped: false });
+		expect(levels).toMatchObject({ start: 140_000, target: 100_000, ceiling: 160_000, clamped: false });
 	});
 
 	it("caps the output reserve and adds the configured extra reserve", () => {
@@ -63,7 +63,7 @@ describe("pressure levels", () => {
 });
 
 describe("pressure decisions", () => {
-	const levels = pressureLevels(100_000, 10_000, DEFAULTS)!; // start/target 70k, ceiling 80k
+	const levels = pressureLevels(100_000, 10_000, parseLiveCompactConfig({ thresholds: { startRatio: 0.7, targetRatio: 0.7, ceilingRatio: 0.8 } }))!; // start/target 70k, ceiling 80k
 
 	it("does nothing below start, even with large predicted growth", () => {
 		expect(decidePressure(50_000, 40_000, levels)).toMatchObject({ action: "idle", reclaimTokens: 0 });
