@@ -573,4 +573,13 @@ describe("codex-settings style TUI settings menu & store", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("provides 5% step presets for target/start/urgent and enforces strict target < start < urgent in the settings pane", async () => {
+		const fields = buildLiveCompactSettingFields();
+		const expectedSteps = Array.from({ length: 19 }, (_, index) => (index + 1) * 5);
+		for (const id of ["targetPercent", "startPercent", "ceilingPercent"]) {
+			const field = fields.find((candidate) => candidate.id === id);
+			expect(field?.choices).toEqual(expectedSteps);
+		}
+	});
 });

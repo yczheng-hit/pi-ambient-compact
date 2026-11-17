@@ -101,26 +101,26 @@ export function buildLiveCompactSettingFields(ctx?: ExtensionContext): SettingsF
 			"Model route that verifies generated summaries against original messages (dynamic-ai).",
 		),
 		{
-			id: "startPercent",
-			label: "Start threshold",
-			description: "Context usage percentage where maintenance becomes eligible.",
-			choices: [30, 40, 50, 60, 65, 70, 75, 80],
+			id: "targetPercent",
+			label: "Target level",
+			description: "Target context usage percentage after maintenance (must be < start and urgent).",
+			choices: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95],
 			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
 			format: (value) => `${value}%`,
 		},
 		{
-			id: "targetPercent",
-			label: "Target level",
-			description: "Target context usage percentage after maintenance (must be ≤ start threshold).",
-			choices: [30, 35, 40, 50, 60, 65, 70],
+			id: "startPercent",
+			label: "Start threshold",
+			description: "Context usage percentage where maintenance becomes eligible (must be > target and < urgent).",
+			choices: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95],
 			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
 			format: (value) => `${value}%`,
 		},
 		{
 			id: "ceilingPercent",
 			label: "Urgent ceiling",
-			description: "Context usage percentage where cooldown and min-savings checks are bypassed (must be > start).",
-			choices: [70, 75, 80, 85, 90, 95],
+			description: "Context usage percentage where cooldown and min-savings checks are bypassed (must be > target and start).",
+			choices: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95],
 			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
 			format: (value) => `${value}%`,
 		},
@@ -257,14 +257,17 @@ export async function openLiveCompactSettingsPane(
 				fields,
 				status: (values) => {
 					const strategy = values.strategy ?? currentValues.strategy;
-					const start = values.startPercent ?? currentValues.startPercent;
-					const target = values.targetPercent ?? currentValues.targetPercent;
-					const ceiling = values.ceilingPercent ?? currentValues.ceilingPercent;
+					const start = Number(values.startPercent ?? currentValues.startPercent);
+					const target = Number(values.targetPercent ?? currentValues.targetPercent);
+					const ceiling = Number(values.ceilingPercent ?? currentValues.ceilingPercent);
+					if (!(target < start && start < ceiling)) {
+						return `Invalid thresholds: target (${target}%) must be < start (${start}%) < urgent (${ceiling}%)`;
+					}
 					const summary = values.summaryRoute ?? "Working model";
 					const verify = values.verificationRoute ?? "Working model";
 					return strategy === "dynamic-ai"
-						? `dynamic-ai · levels ${start}% → ${target}% (urgent ${ceiling}%) · summary: ${summary} · verify: ${verify}`
-						: `local-tools · levels ${start}% → ${target}% (ceiling ${ceiling}%) · keep ${values.keepRecentToolRounds ?? 3} rounds`;
+						? `dynamic-ai · target ${target}% · start ${start}% · urgent ${ceiling}% · summary: ${summary} · verify: ${verify}`
+						: `local-tools · target ${target}% · start ${start}% · urgent ${ceiling}% · keep ${values.keepRecentToolRounds ?? 3} rounds`;
 				},
 				extraDetails: options.extraDetails ? () => options.extraDetails!(ctx) : undefined,
 				runNow: options.runNow ? (signal) => options.runNow!(ctx, signal) : undefined,
@@ -282,7 +285,14 @@ export async function openLiveCompactSettingsPane(
 					if (typeof cmdCtx.isIdle === "function" && !cmdCtx.isIdle()) {
 						throw new Error("Pi is busy. Retry when idle.");
 					}
-					// Validate cross-field rules (such as 0 < target <= start < ceiling < 1).
+					const start = Number(values.startPercent ?? currentValues.startPercent);
+					const target = Number(values.targetPercent ?? currentValues.targetPercent);
+					const ceiling = Number(values.ceilingPercent ?? currentValues.ceilingPercent);
+					if (!(target < start && start < ceiling)) {
+						throw new Error(
+							`Thresholds must satisfy target < start < urgent (got target ${target}%, start ${start}%, urgent ${ceiling}%).`,
+						);
+					}
 					settingValuesToConfig(values, currentConfig);
 				},
 				apply: (values, nextSession) => {

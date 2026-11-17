@@ -573,7 +573,7 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			expect(statusText).toContain("protected: recent rounds");
 			expect(statusText).toContain("summary: working model");
 			expect(statusText).toContain("session totals: 1 cycle(s) committed, 1 segment(s) summarized");
-			expect(run.statuses.at(-1)).toMatch(/^Ambient Compact \d+% · band 50%–70% \(urgent 80%\)$/u);
+			expect(run.statuses.at(-1)).toBe("Ambient Compact · target 50% · start 70% · urgent 80%");
 		} finally {
 			await run.dispose();
 		}

@@ -313,18 +313,10 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				return;
 			}
 			const window = currentLevels.contextWindow;
-			let currentTokens = lastAfter;
-			if (currentTokens === undefined && typeof ctx.sessionManager.buildSessionProjection === "function") {
-				try {
-					currentTokens = measureProjection(ctx.sessionManager.buildSessionProjection().messages, false).projected;
-				} catch {
-					currentTokens = undefined;
-				}
-			}
 			const pending = findIncompleteBatches(ctx.sessionManager.getBranch()).length > 0;
 			ctx.ui.setStatus(
 				DYNAMIC_STATUS_KEY,
-				`Ambient Compact ${percent(currentTokens, window)} · band ${percent(currentLevels.target, window)}–${percent(currentLevels.start, window)} (urgent ${percent(currentLevels.ceiling, window)})${pending ? " · batch pending" : ""}`,
+				`Ambient Compact · target ${percent(currentLevels.target, window)} · start ${percent(currentLevels.start, window)} · urgent ${percent(currentLevels.ceiling, window)}${pending ? " · batch pending" : ""}`,
 			);
 		}
 
