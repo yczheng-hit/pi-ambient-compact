@@ -88,7 +88,7 @@ Requirements:
   "onlineContextCompact": true,
   "liveCompact": {
     "enabled": true,
-    "thresholds": { "startRatio": 0.7, "targetRatio": 0.7, "ceilingRatio": 0.8 },
+    "thresholds": { "startRatio": 0.7, "targetRatio": 0.5, "ceilingRatio": 0.8 },
     "protection": { "keepRecentToolRounds": 3, "minFullRequests": 2 },
     "observation": { "minBytes": 10240, "excerptTargetBytes": 8192 }
   }
@@ -98,7 +98,7 @@ Requirements:
 | Field | Default | Meaning |
 |---|---|---|
 | `thresholds.startRatio` | `0.7` | Share of the model window where maintenance starts. |
-| `thresholds.targetRatio` | `0.7` | Level a reduction returns to. |
+| `thresholds.targetRatio` | `0.5` | Level a reduction returns to. |
 | `thresholds.ceilingRatio` | `0.8` | Soft ceiling; a reduction starts when the context is over it or the next turn is expected to cross it. |
 | `protection.keepRecentToolRounds` | `3` | Most recent complete tool rounds kept verbatim; parallel calls from one assistant message count as one round. |
 | `protection.minFullRequests` | `2` | Assistant responses that must have seen a result in full before it may be condensed. |

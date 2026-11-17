@@ -44,7 +44,7 @@
     "enabled": true,
     "thresholds": {
       "startRatio": 0.70,
-      "targetRatio": 0.70,
+      "targetRatio": 0.50,
       "ceilingRatio": 0.80
     },
     "protection": {
@@ -93,7 +93,7 @@
 |---|---:|---|
 | `enabled` | `false` | 布尔值 |
 | `thresholds.startRatio` | `0.70` | 进入维护的输入占窗比例 |
-| `thresholds.targetRatio` | `0.70` | 需要整理时的目标比例，不是必须填满的下限 |
+| `thresholds.targetRatio` | `0.50` | 需要整理时的目标比例，不是必须填满的下限 |
 | `thresholds.ceilingRatio` | `0.80` | 日常软上限，不取代请求安全上限 |
 | `protection.keepRecentToolRounds` | `3` | 1–100；正常保护的完整工具轮数，单轮并行调用不拆开计数 |
 | `protection.minFullRequests` | `2` | 1–20；正常路径至少完整展示的已确认 provider 请求数 |

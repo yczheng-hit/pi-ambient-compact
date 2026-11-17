@@ -442,7 +442,7 @@ Pi 原生状态栏可能使用上次 usage 或 canonical 投影估计，与本�
     "enabled": true,
     "thresholds": {
       "startRatio": 0.70,
-      "targetRatio": 0.70,
+      "targetRatio": 0.50,
       "ceilingRatio": 0.80
     },
     "protection": {

@@ -129,7 +129,7 @@ Start from [`sol-pi.live-compact.example.json`](sol-pi.live-compact.example.json
   "cacheWriteReadRatio": 12.5,
   "liveCompact": {
     "enabled": true,
-    "thresholds": { "startRatio": 0.7, "targetRatio": 0.7, "ceilingRatio": 0.8 },
+    "thresholds": { "startRatio": 0.7, "targetRatio": 0.5, "ceilingRatio": 0.8 },
     "protection": { "keepRecentToolRounds": 3, "minFullRequests": 2 },
     "observation": { "minBytes": 10240, "excerptTargetBytes": 8192 }
   }
