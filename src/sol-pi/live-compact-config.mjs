@@ -15,7 +15,7 @@
 const MAX_TIMEOUT_MS = 1_800_000;
 /** Strategies: the P1 tool-result condensing, or the global AI maintenance of docs/live-compact-dynamic-plan.md. */
 export const LIVE_COMPACT_STRATEGIES = Object.freeze(["local-tools", "dynamic-ai"]);
-/** dynamic-ai's default target when thresholds.targetRatio is not configured (capped at startRatio). */
+/** Default target ratio when thresholds.targetRatio is not configured (strictly below startRatio). */
 export const DYNAMIC_DEFAULT_TARGET_RATIO = 0.5;
 export const DEFAULT_LIVE_COMPACT_CONFIG = deepFreeze({
 	enabled: false,
@@ -159,8 +159,8 @@ export function parseLiveCompactConfig(value) {
 	if (!(isRecord(value.thresholds) && Object.hasOwn(value.thresholds, "targetRatio"))) {
 		const start = config.thresholds.startRatio;
 		const fallbackTarget =
-			start > DEFAULT_TARGET_RATIO
-				? DEFAULT_TARGET_RATIO
+			start > DYNAMIC_DEFAULT_TARGET_RATIO
+				? DYNAMIC_DEFAULT_TARGET_RATIO
 				: start > 0.05
 					? Number((start - 0.05).toFixed(4))
 					: start / 2;
