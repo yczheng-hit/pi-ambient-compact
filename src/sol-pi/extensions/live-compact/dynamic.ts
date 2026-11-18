@@ -36,6 +36,7 @@ import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
 	type ExtensionFactory,
 	getAgentDir,
@@ -44,7 +45,7 @@ import {
 	type SessionEntry,
 	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { CancellableLoader, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { findConfigPath } from "../../config.ts";
 import type { LiveCompactConfig } from "../../live-compact-config.mjs";
@@ -301,6 +302,42 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			return { projected, ratio };
 		};
 
+		/**
+		 * Session projection with any pending out-of-boundary (`BATCH_BEGIN`) edits applied,
+		 * so `/ambient-compact status` and consecutive `/ambient-compact now` runs immediately see
+		 * segments already summarized before the next boundary persists `context_edit` entries.
+		 */
+		const effectiveProjection = (
+			ctx: ExtensionContext,
+		): { readonly entries: readonly ProjectedSessionEntry[]; readonly messages: readonly AgentMessage[] } => {
+			const raw = ctx.sessionManager.buildSessionProjection();
+			const incomplete = findIncompleteBatches(ctx.sessionManager.getBranch());
+			if (incomplete.length === 0) return raw;
+			const byTarget = new Map<string, PlannedEdit>();
+			for (const edit of incomplete.flatMap((batch) => batch.remaining)) {
+				byTarget.set(edit.targetId, edit);
+			}
+			const entries: ProjectedSessionEntry[] = [];
+			const messages: AgentMessage[] = [];
+			for (const entry of raw.entries) {
+				const edit = byTarget.get(entry.sourceEntry.id);
+				if (!edit) {
+					entries.push(entry);
+					messages.push(...entry.messages);
+				} else if (edit.replacement !== null) {
+					const first = entry.messages[0];
+					const nextMessages = first
+						? ([{ ...first, content: edit.replacement.content } as AgentMessage] as const)
+						: ([] as const);
+					entries.push({ ...entry, messages: [...nextMessages] });
+					messages.push(...nextMessages);
+				} else {
+					entries.push({ ...entry, messages: [] });
+				}
+			}
+			return { entries, messages };
+		};
+
 		function showBarStatus(ctx: ExtensionContext): void {
 			if (!ctx.hasUI || typeof ctx.ui?.setStatus !== "function") return;
 			if (running) {
@@ -354,6 +391,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			currentLevels: PressureLevels,
 			force: boolean,
 			signalOverride?: AbortSignal,
+			onProgress?: (stage: string) => void,
 		): Promise<CycleResult | CycleReport> => {
 			const window = currentLevels.contextWindow;
 			const ratio = calibration ?? 1;
@@ -434,6 +472,10 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						signal: cycleSignal(signalOverride ?? ctx.signal, timeoutMs),
 						tokenRatio: ratio,
 						routes: { summary: effective.summary.call, verification: effective.verification.call },
+						onProgress: (stage) => {
+							status(ctx, `Ambient Compact: ${stage}`);
+							onProgress?.(stage);
+						},
 					},
 					ctx,
 				);
@@ -544,17 +586,40 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		const isResult = (value: CycleResult | CycleReport): value is CycleResult => "state" in value;
 
 		/** Run a cycle outside a boundary and hand its batch to the interrupted-batch path. */
-		const runOutsideBoundary = async (ctx: ExtensionContext, trigger: "command" | "input"): Promise<CycleResult | CycleReport | string> => {
-			if (running) return "a maintenance cycle is already running";
-			if (findIncompleteBatches(ctx.sessionManager.getBranch()).length > 0) return "a batch is already pending; it applies to the next request";
+		const runOutsideBoundary = async (
+			ctx: ExtensionContext,
+			trigger: "command" | "input",
+			runOptions?: { readonly signal?: AbortSignal; readonly onProgress?: (stage: string) => void },
+		): Promise<CycleResult | CycleReport | string> => {
+			if (running) {
+				if (trigger === "command" && bgAbort) {
+					// Preempt an in-flight background cycle so an explicit `/ambient-compact now` runs immediately.
+					bgAbort.abort();
+					bgAbort = undefined;
+					activeBgPromise = undefined;
+					running = false;
+				} else {
+					return "a maintenance cycle is already running";
+				}
+			}
 			const currentLevels = levelsFor(ctx);
 			if (!currentLevels) return "the model window is unknown";
 			levels = currentLevels;
-			const projection = ctx.sessionManager.buildSessionProjection();
+			const projection = effectiveProjection(ctx);
 			const projected = lastAfter ?? measureProjection(projection.messages, true).projected;
 			running = true;
 			try {
-				const result = await runCycle(ctx, trigger, projection.entries, projection.messages, projected, currentLevels, true);
+				const result = await runCycle(
+					ctx,
+					trigger,
+					projection.entries,
+					projection.messages,
+					projected,
+					currentLevels,
+					true,
+					runOptions?.signal,
+					runOptions?.onProgress,
+				);
 				if (!isResult(result)) {
 					report(result);
 					return result;
@@ -833,7 +898,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			let projectionEntries: readonly ProjectedSessionEntry[] = [];
 			if (typeof ctx.sessionManager.buildSessionProjection === "function") {
 				try {
-					const projection = ctx.sessionManager.buildSessionProjection();
+					const projection = effectiveProjection(ctx);
 					projectionEntries = projection.entries;
 					const measured = measureProjection(projection.messages, false);
 					if (currentTokens === undefined) currentTokens = measured.projected;
@@ -1012,14 +1077,69 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 								showBarStatus(ctx);
 							},
 							extraDetails: statusLines,
-							runNow: async (c) => formatNowResult(await runOutsideBoundary(c, "command")),
+							runNow: async (c, signal) => formatNowResult(await runOutsideBoundary(c, "command", { signal })),
 							configPathOverride: options.configPath,
 						});
 					} else if (!command || command === "status") {
 						ctx.ui.notify(statusLines(ctx).join("\n"), "info");
 					} else if (command === "now") {
-						const result = await runOutsideBoundary(ctx, "command");
-						ctx.ui.notify(`Ambient Compact: ${formatNowResult(result)}`, "info");
+						if (canOpenSettingsTui(ctx)) {
+							const cmdCtx = ctx as ExtensionCommandContext & {
+								ui: {
+									custom: <T>(
+										factory: (
+											tui: { requestRender: () => void },
+											theme: { fg: (color: "accent" | "muted" | "dim", text: string) => string },
+											_keys: unknown,
+											done: (value: T) => void,
+										) => CancellableLoader,
+									) => Promise<T>;
+								};
+							};
+							const startedAt = now();
+							const result = await cmdCtx.ui.custom<CycleResult | CycleReport | string>((tui, theme, _keys, done) => {
+								let currentStage = "scanning history…";
+								const formatLabel = () => {
+									const elapsedSec = Math.max(0, Math.floor((now() - startedAt) / 1_000));
+									return `Ambient Compact: ${currentStage} (${elapsedSec}s · Esc to cancel)`;
+								};
+								const loader = new CancellableLoader(
+									tui as never,
+									(s) => theme.fg("accent", s),
+									(s) => theme.fg("muted", s),
+									formatLabel(),
+								);
+								const timer = setInterval(() => {
+									loader.setMessage(formatLabel());
+									tui.requestRender();
+								}, 1_000);
+								timer.unref?.();
+								let finished = false;
+								const finish = (val: CycleResult | CycleReport | string) => {
+									if (finished) return;
+									finished = true;
+									clearInterval(timer);
+									loader.dispose();
+									done(val);
+								};
+								loader.onAbort = () => finish("cancelled by user (history is unchanged)");
+								void runOutsideBoundary(ctx, "command", {
+									signal: loader.signal,
+									onProgress: (stage) => {
+										currentStage = stage;
+										loader.setMessage(formatLabel());
+										tui.requestRender();
+									},
+								}).then(finish, (err) =>
+									finish(err instanceof Error ? err.message : "maintenance failed"),
+								);
+								return loader;
+							});
+							ctx.ui.notify(`Ambient Compact: ${formatNowResult(result)}`, "info");
+						} else {
+							const result = await runOutsideBoundary(ctx, "command");
+							ctx.ui.notify(`Ambient Compact: ${formatNowResult(result)}`, "info");
+						}
 					} else if (command === "model") {
 						ctx.ui.notify(rest.length === 0 ? routeLines(ctx).join("\n") : `Ambient Compact: ${setRoute(rest, ctx)}`, "info");
 					} else {

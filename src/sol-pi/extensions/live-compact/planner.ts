@@ -25,6 +25,8 @@ export interface PlanRequest {
 	readonly tokenRatio?: number;
 	/** The effective routes for this cycle; the configured ones when omitted. */
 	readonly routes?: { readonly summary: LiveCompactCallConfig; readonly verification: LiveCompactCallConfig };
+	/** Optional callback invoked as the planner moves through generation, verification, and retries. */
+	readonly onProgress?: (stage: string) => void;
 }
 
 export interface PlanSelection {

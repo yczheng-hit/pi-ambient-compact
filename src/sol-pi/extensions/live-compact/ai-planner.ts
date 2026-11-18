@@ -230,11 +230,13 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 						lengthRetried = true;
 						currentMaxTokens = boosted;
 						notes.push(`output hit length limit (${ initialMaxTokens } tokens), retrying with ${boosted} tokens`);
+						request.onProgress?.(`output hit length limit, retrying with ${boosted.toLocaleString("en-US")} max tokens…`);
 						continue;
 					}
 				}
 				if (!isTransientFailure(result) || retry >= TRANSIENT_RETRIES) return result;
 				notes.push(`transient failure, retrying: ${(result.errorMessage ?? "").slice(0, 120)}`);
+				request.onProgress?.(`rate-limited or transient error, retrying (${retry + 1}/${TRANSIENT_RETRIES})…`);
 				await sleep(RETRY_DELAYS_MS[retry] ?? 15_000, request.signal);
 			}
 		};
@@ -255,6 +257,12 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 		let feedback: Map<string, readonly string[]> | undefined;
 		const accepted: PlanSelection[] = [];
 		for (let attempt = 0; attempt <= maxRegenerations && pending.length > 0 && calls + 2 <= maxCalls; attempt += 1) {
+			const pendingTokens = Math.ceil(pending.reduce((sum, seg) => sum + seg.tokens, 0) * ratio);
+			request.onProgress?.(
+				attempt === 0
+					? `summarizing ${pending.length} segment(s) (~${pendingTokens.toLocaleString("en-US")} tokens)…`
+					: `regenerating ${pending.length} rejected summary(ies) (retry ${attempt}/${maxRegenerations})…`,
+			);
 			const generated = await call(
 				summaryModel,
 				routes.summary,
@@ -276,6 +284,7 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 				notes.push("selected segments do not fit the verification model");
 				break;
 			}
+			request.onProgress?.(`verifying ${pairs.length} summary(ies) against originals…`);
 			const verifyWanted = Math.max(16_384, 2_000 + pairs.length * 500);
 			const verified = await call(
 				verifyModel,
