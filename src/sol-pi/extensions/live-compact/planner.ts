@@ -27,6 +27,10 @@ export interface PlanRequest {
 	readonly routes?: { readonly summary: LiveCompactCallConfig; readonly verification: LiveCompactCallConfig };
 	/** Optional callback invoked as the planner moves through generation, verification, and retries. */
 	readonly onProgress?: (stage: string) => void;
+	/** True when context is at/above the urgent ceiling or triggered via `/ambient-compact now`. */
+	readonly urgent?: boolean;
+	/** Current context usage ratio (e.g. 0.88 for 88%), when known. */
+	readonly usageRatio?: number;
 }
 
 export interface PlanSelection {

@@ -620,4 +620,44 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 		}
 	});
 
+	it("bypasses head-of-line segments that returned no_selection and compacts subsequent segments on the next cycle", async () => {
+		const basePlanner = deterministicPlanner();
+		const seenPools: string[][] = [];
+		let callCount = 0;
+		const headBlockingPlanner: Planner = async (req, ctx) => {
+			callCount += 1;
+			seenPools.push(req.candidates.map((s) => s.id));
+			if (callCount === 1) {
+				// Cycle 1: planner declines the oldest segment(s) in the pool.
+				return {
+					selections: [],
+					usage: { calls: 1, inputTokens: 100, outputTokens: 10 },
+					notes: [`planner chose 0 of ${req.candidates.length} candidate segment(s)`],
+				};
+			}
+			return basePlanner(req, ctx);
+		};
+		const run = await session({
+			planner: headBlockingPlanner,
+			live: {
+				thresholds: { startRatio: 0.5, targetRatio: 0.35, ceilingRatio: 0.6 },
+				protection: { keepRecentToolRounds: 1 },
+				maintenance: { cooldownRequests: 0, minSavingsRatio: 0.05 },
+			},
+		});
+		try {
+			await run.prompt("task A", [...dumps("a", 3), fauxAssistantMessage("A done")]);
+			await run.prompt("task B", [...dumps("b", 3), fauxAssistantMessage("B done")]);
+			await run.prompt("task C", [...dumps("c", 2), fauxAssistantMessage("C done")]);
+
+			expect(seenPools.length).toBeGreaterThanOrEqual(2);
+			// The first cycle saw task A's segment and returned no_selection; the next cycle bypassed it and compacted task B!
+			expect(run.reports.some((r) => r.outcome === "no_selection")).toBe(true);
+			expect(run.reports.some((r) => r.outcome === "committed")).toBe(true);
+			expect(seenPools[1]![0]).not.toBe(seenPools[0]![0]);
+		} finally {
+			await run.dispose();
+		}
+	});
+
 });

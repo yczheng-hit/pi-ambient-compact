@@ -595,4 +595,70 @@ describe("codex-settings style TUI settings menu & store", () => {
 			/Invalid thresholds: target \(50%\) must be < start \(80%\) < urgent \(80%\)/u,
 		);
 	});
+
+	it("continues past oversized segments and bypasses previously skipped head-of-line segments in selectCandidatePool", async () => {
+		const { selectCandidatePool } = await import("../src/sol-pi/extensions/live-compact/dynamic.ts");
+		const seg = (id: string, tokens: number): Segment => ({
+			id,
+			kind: "episode",
+			messages: [],
+			tokens,
+			episodeStart: 0,
+		});
+		const segments = [
+			seg("seg_0", 38_000),
+			seg("seg_1", 18_000),
+			seg("seg_2", 28_000),
+			seg("seg_3_huge", 30_000), // 84k + 30k = 114k; at ratio 1.585 -> 133.1k + 47.55k = 180.6k > 150k
+			seg("seg_4_small", 5_000), // 84k + 5k = 89k; at ratio 1.585 -> 141.0k <= 150k
+			seg("seg_5_small", 4_000), // 89k + 4k = 93k; at ratio 1.585 -> 147.4k <= 150k
+		];
+		const ratio = 1.585;
+		// 1. Continues past seg_3_huge to include seg_4_small and seg_5_small.
+		const pass1 = selectCandidatePool(segments, { goal: 300_000, ratio, maxPoolTokens: 150_000 });
+		expect(pass1.pool.map((s) => s.id)).toEqual(["seg_0", "seg_1", "seg_2", "seg_4_small", "seg_5_small"]);
+
+		// 2. When seg_0..seg_2 failed or returned no_selection in cycle 1, cycle 2 bypasses them and picks seg_3_huge + small ones.
+		const skippedCounts = new Map<string, number>([
+			["seg_0", 1],
+			["seg_1", 1],
+			["seg_2", 1],
+		]);
+		const pass2 = selectCandidatePool(segments, {
+			goal: 40_000, // 40k * 1.5 = 60k; seg_3_huge + seg_4_small + seg_5_small = 39k * 1.585 = 61.8k >= 60k
+			ratio,
+			maxPoolTokens: 150_000,
+			skippedCounts,
+		});
+		expect(pass2.pool.map((s) => s.id)).toEqual(["seg_3_huge", "seg_4_small", "seg_5_small"]);
+
+		// 3. When all segments have been skipped, Pass 2 backfills ordered by lowest failure count first.
+		const allSkipped = new Map<string, number>([
+			["seg_0", 3],
+			["seg_1", 2],
+			["seg_2", 1],
+			["seg_3_huge", 2],
+			["seg_4_small", 1],
+			["seg_5_small", 1],
+		]);
+		const backfilled = selectCandidatePool(segments, {
+			goal: 36_000, // 36k * 1.5 = 54k; seg_2 + seg_4 + seg_5 = 37k * 1.585 = 58.6k >= 54k
+			ratio,
+			maxPoolTokens: 150_000,
+			skippedCounts: allSkipped,
+		});
+		expect(backfilled.pool.map((s) => s.id)).toEqual(["seg_2", "seg_4_small", "seg_5_small"]);
+	});
+
+	it("records diagnostic note on empty selections and injects urgent pressure into the generation prompt", async () => {
+		const { complete, prompts } = fakeComplete([{ text: '{"selections":[]}' }]);
+		const plan = await createAiPlanner({ config, complete })(
+			{ ...request(), urgent: true, usageRatio: 0.88 },
+			ctx,
+		);
+		expect(plan.selections).toEqual([]);
+		expect(plan.notes).toContain("planner chose 0 of 2 candidate segment(s)");
+		expect(prompts[0]).toContain("Context pressure: URGENT (88%)");
+		expect(prompts[0]).toContain("You MUST select older exploratory reads");
+	});
 });

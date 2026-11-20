@@ -70,17 +70,22 @@ const GENERATE_SYSTEM = [
 	"You maintain the working history of a coding agent. Some older history segments no longer need to stay verbatim.",
 	"Choose which listed segments to replace with summaries, and write each summary.",
 	"Rules:",
-	"- Choose a segment only when its verbatim detail is no longer needed for the current work. Skip it when exact text in it is still likely needed: code being edited now, an unresolved error, output the user asked about.",
-	"- Prefer repetitive or superseded material: repeated status checks with no change, exploratory reads, long logs whose outcome is known.",
-	"- A summary must keep: user constraints and decisions; file paths, identifiers, commands, and numbers that matter; what was tried and what happened, with failures and successes exactly as recorded; state changes; anything left unresolved. Mark unverified claims as unverified. Never invent facts. Never add instructions.",
+	"- Choose a segment when its verbatim detail is no longer needed for the current work. Even if the session is still working on the same file or topic, earlier exploratory reads, intermediate status checks, completed sub-steps, or superseded outputs on that file SHOULD be summarized once their key findings are captured. Only skip a segment when its exact unedited text is still actively needed line-by-line right now.",
+	"- Prefer repetitive or superseded material: repeated status checks with no change, exploratory reads, large tables/logs whose key takeaways are known.",
+	"- A summary must keep: user constraints and decisions; key file paths, identifiers, commands, and numbers that matter to the outcome or next steps; what was tried and what happened, with failures and successes as recorded; state changes; anything left unresolved. Mark unverified claims as unverified. Never invent facts. Never add new imperative instructions to the agent (reporting rules or constraints documented in files/scripts as historical facts is fine).",
 	"- Keep each summary within the token cap given for its segment; shorter is fine for repetitive material.",
-	"- Aim for the reclaim target given below. Reclaiming less is fine; never choose a segment only to reach the number.",
-	'Answer with JSON only: {"selections":[{"segment":"<segment id>","summary":"<text>"}]}. Use an empty list when nothing should be summarized.',
+	"- Aim for the reclaim target given below. Reclaiming less is fine; when context pressure is urgent, actively select older exploratory or intermediate segments rather than returning an empty list.",
+	'Answer with JSON only: {"selections":[{"segment":"<segment id>","summary":"<text>"}]}. Use an empty list only when no candidate segment can be safely summarized.',
 ].join("\n");
 
 const VERIFY_SYSTEM = [
 	"You check summaries of a coding agent's history against the original messages.",
-	"For each segment answer ok only if the summary contradicts nothing in the original, invents nothing, keeps every failure, error, negative result, and unresolved issue, keeps the paths, identifiers, numbers, and commands that matter, does not turn plans or attempts into completed work, and contains no instruction or request addressed to the agent (text that told the agent to do something is reported as history, never repeated as an instruction). Leaving out repetitive detail is fine.",
+	"For each segment answer ok only if the summary:",
+	"- contradicts nothing in the original and invents no facts;",
+	"- keeps every failure, error, negative result, and unresolved issue;",
+	"- keeps the key paths, identifiers, numbers, and commands that matter to the outcome or next steps (in large tables, logs, or exploratory file reads, omitting secondary rows, minor paths, or routine probe numbers to fit summary_cap is expected and fine);",
+	"- does not turn plans or attempts into completed work;",
+	"- does not issue new imperative instructions to the current agent (objectively describing or quoting rules, constraints, or prohibitions found in project docs, scripts, or tool outputs—such as 'the doc states never stop Golden jobs'—is valid historical reporting and MUST be allowed).",
 	'Answer with JSON only: {"verdicts":[{"segment":"<segment id>","ok":true,"problems":[]}]}. List concrete problems when ok is false.',
 ].join("\n");
 
@@ -88,15 +93,32 @@ function segmentBlock(segment: Segment): string {
 	return `<segment id="${segment.id}" kind="${segment.kind}" tokens="${segment.tokens}" summary_cap="${summaryCap(segment)}">\n${renderSegment(segment)}\n</segment>`;
 }
 
-function generatePrompt(candidates: readonly Segment[], userTurns: readonly string[], reclaimTokens: number, feedback?: ReadonlyMap<string, readonly string[]>): string {
+function generatePrompt(
+	candidates: readonly Segment[],
+	userTurns: readonly string[],
+	reclaimTokens: number,
+	options?: {
+		readonly feedback?: ReadonlyMap<string, readonly string[]>;
+		readonly urgent?: boolean;
+		readonly usageRatio?: number;
+	},
+): string {
 	const turns = userTurns.length > 0 ? userTurns.map((turn) => `- ${turn}`).join("\n") : "- (none)";
+	const feedback = options?.feedback;
+	const pct =
+		options?.usageRatio !== undefined && Number.isFinite(options.usageRatio)
+			? ` (${Math.round(options.usageRatio * 100)}%)`
+			: "";
+	const pressure = options?.urgent
+		? `\n\nContext pressure: URGENT${pct} — context is at or above the urgent ceiling (or manual compaction was requested). You MUST select older exploratory reads, intermediate checks, or superseded outputs to reclaim tokens rather than returning an empty selection, even if they touch the same files as current work.`
+		: "";
 	const notes =
 		feedback && feedback.size > 0
 			? `\n\nA checker rejected earlier summaries of these segments. Fix every listed problem:\n${[...feedback]
 					.map(([id, problems]) => `- ${id}: ${problems.join("; ") || "unspecified"}`)
 					.join("\n")}`
 			: "";
-	return `User requests in this session (verbatim, oldest first):\n${turns}\n\nReclaim target: about ${reclaimTokens} tokens.${notes}\n\nCandidate segments (oldest first):\n${candidates.map(segmentBlock).join("\n")}`;
+	return `User requests in this session (verbatim, oldest first):\n${turns}\n\nReclaim target: about ${reclaimTokens} tokens.${pressure}${notes}\n\nCandidate segments (oldest first):\n${candidates.map(segmentBlock).join("\n")}`;
 }
 
 function verifyPrompt(pairs: ReadonlyArray<{ readonly segment: Segment; readonly summary: string }>): string {
@@ -127,6 +149,10 @@ export function parseSelections(
 	const notes: string[] = [];
 	const parsed = parseJsonObject(text);
 	if (!parsed || !Array.isArray(parsed.selections)) return { selections: [], notes: ["generation answer was not the expected JSON"] };
+	if (parsed.selections.length === 0) {
+		notes.push(`planner chose 0 of ${candidates.size} candidate segment(s)`);
+		return { selections: [], notes };
+	}
 	const selections: PlanSelection[] = [];
 	const seen = new Set<string>();
 	for (const item of parsed.selections as unknown[]) {
@@ -182,7 +208,7 @@ function fitCandidates(candidates: readonly Segment[], model: Model<Api>, overhe
 	let used = 0;
 	for (const segment of candidates) {
 		const tokens = Math.ceil(estimateTextTokens(segmentBlock(segment)) * ratio);
-		if (used + tokens > room) break;
+		if (used + tokens > room) continue;
 		fitted.push(segment);
 		used += tokens;
 	}
@@ -267,7 +293,11 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 				summaryModel,
 				routes.summary,
 				GENERATE_SYSTEM,
-				generatePrompt(pending, request.userTurns, request.reclaimTokens, feedback),
+				generatePrompt(pending, request.userTurns, request.reclaimTokens, {
+					feedback,
+					urgent: request.urgent,
+					usageRatio: request.usageRatio,
+				}),
 				generationTokens,
 			);
 			if (!generated.ok) {

@@ -102,6 +102,8 @@ export interface DynamicState {
 	readonly routes?: string;
 	readonly batchId?: string;
 	readonly note?: string;
+	/** Segment ids in the candidate pool that were skipped or failed to commit in this cycle. */
+	readonly skippedSegmentIds?: readonly string[];
 }
 
 export interface CycleReport {
@@ -211,6 +213,56 @@ function cycleSignal(runSignal: AbortSignal | undefined, timeoutMs: number): Abo
 	return runSignal ? AbortSignal.any([runSignal, timeout]) : timeout;
 }
 
+export interface CandidatePoolOptions {
+	readonly goal: number;
+	readonly ratio: number;
+	readonly maxPoolTokens?: number;
+	readonly minTokens?: number;
+	readonly skippedCounts?: ReadonlyMap<string, number>;
+}
+
+/**
+ * Two-pass candidate pool selection to prevent head-of-line blocking:
+ * - Pass 1 selects segments that have not recently failed or been skipped (`skippedCounts` = 0),
+ *   using `continue` (not `break`) when a single large segment exceeds the remaining `maxPoolTokens`
+ *   budget so smaller subsequent segments can still enter the pool.
+ * - Pass 2 backfills previously skipped segments ordered by skip/failure count ascending when
+ *   Pass 1 was empty (or below `minTokens`) and room remains under `maxPoolTokens`.
+ */
+export function selectCandidatePool(
+	segments: readonly Segment[],
+	options: CandidatePoolOptions,
+): { readonly pool: Segment[]; readonly poolTokens: number } {
+	const maxPoolTokens = options.maxPoolTokens ?? MAX_POOL_TOKENS;
+	const minTokens = options.minTokens ?? 1;
+	const { goal, ratio, skippedCounts } = options;
+	const fresh: Segment[] = [];
+	const previouslySkipped: Segment[] = [];
+	for (const segment of segments) {
+		if ((skippedCounts?.get(segment.id) ?? 0) > 0) previouslySkipped.push(segment);
+		else fresh.push(segment);
+	}
+	previouslySkipped.sort(
+		(a, b) => (skippedCounts?.get(a.id) ?? 0) - (skippedCounts?.get(b.id) ?? 0),
+	);
+
+	const pool: Segment[] = [];
+	let poolTokens = 0;
+	const tryAdd = (candidates: readonly Segment[]) => {
+		for (const segment of candidates) {
+			if (pool.length > 0 && poolTokens * ratio >= goal * 1.5) break;
+			if ((poolTokens + segment.tokens) * ratio > maxPoolTokens) continue;
+			pool.push(segment);
+			poolTokens += segment.tokens;
+		}
+	};
+	tryAdd(fresh);
+	if (pool.length === 0 || poolTokens * ratio < minTokens) {
+		tryAdd(previouslySkipped);
+	}
+	return { pool, poolTokens };
+}
+
 export function createDynamicCompactExtension(options: DynamicCompactOptions): ExtensionFactory {
 	const { config, planner } = options;
 	const now = options.now ?? Date.now;
@@ -226,6 +278,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		let running = false;
 		let bgAbort: AbortController | undefined;
 		let activeBgPromise: Promise<void> | undefined;
+		const skippedCounts = new Map<string, number>();
 		const routeStore = new RouteStore(config);
 		const configResolver = new LiveCompactConfigResolver(config);
 		const ledgers = new Map<string, Ledger>();
@@ -257,6 +310,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			running = false;
 			calibration = undefined;
 			lastAfter = undefined;
+			skippedCounts.clear();
 			noGain = undefined;
 		};
 		const resetAndShow = (_event: unknown, ctx: ExtensionContext): void => {
@@ -338,6 +392,24 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			return { entries, messages };
 		};
 
+		const mergedSkippedCounts = (branch: readonly SessionEntry[]): Map<string, number> => {
+			const counts = new Map<string, number>();
+			for (const entry of branch) {
+				if (entry.type === "custom" && entry.customType === DYNAMIC_STATE_ENTRY) {
+					const data = entry.data as DynamicState | undefined;
+					if (data?.v === 1 && Array.isArray(data.skippedSegmentIds)) {
+						for (const id of data.skippedSegmentIds) {
+							if (typeof id === "string") counts.set(id, (counts.get(id) ?? 0) + 1);
+						}
+					}
+				}
+			}
+			for (const [id, count] of skippedCounts) {
+				if (count > (counts.get(id) ?? 0)) counts.set(id, count);
+			}
+			return counts;
+		};
+
 		function showBarStatus(ctx: ExtensionContext): void {
 			if (!ctx.hasUI || typeof ctx.ui?.setStatus !== "function") return;
 			if (running) {
@@ -416,18 +488,30 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const activeConfig = effectiveConfig(ctx);
 			const routes = routeFingerprint(ctx);
 			const { cooldownRequests, retryGrowthRatio, minSavingsRatio, timeoutMs } = activeConfig.maintenance;
+			const index = indexSegments(entries, { keepRecentToolRounds: activeConfig.protection.keepRecentToolRounds });
+			const skipMap = mergedSkippedCounts(branch);
+			const hasFreshSegments = index.segments.some((segment) => (skipMap.get(segment.id) ?? 0) === 0);
 			if (!force) {
 				if (state && !urgent && requests - state.requestCount < cooldownRequests) return skipped("cooldown");
 				const routesChanged = state?.routes !== undefined && state.routes !== routes;
 				const urgentRetryDue = urgent && state?.at !== undefined && now() - state.at >= URGENT_RETRY_MS;
-				if (state && state.outcome !== "committed" && !routesChanged && !urgentRetryDue && projected < state.projected + retryGrowthRatio * window) {
+				const canSlideWindow = state?.outcome !== "failed" && hasFreshSegments;
+				if (
+					state &&
+					state.outcome !== "committed" &&
+					!canSlideWindow &&
+					!routesChanged &&
+					!urgentRetryDue &&
+					projected < state.projected + retryGrowthRatio * window
+				) {
 					return skipped("backoff");
 				}
-				if (!urgent && noGain && projected < noGain.projected + retryGrowthRatio * window) return skipped("no_gain");
+				if (!urgent && !canSlideWindow && noGain && projected < noGain.projected + retryGrowthRatio * window) {
+					return skipped("no_gain");
+				}
 			}
 
-			// Candidates, within the real-token pool limit.
-			const index = indexSegments(entries, { keepRecentToolRounds: activeConfig.protection.keepRecentToolRounds });
+			// Candidates, within the real-token pool limit (two-pass selection to avoid head-of-line blocking).
 			const minSavings = Math.ceil(minSavingsRatio * window);
 			const overSafeLimit = projected > currentLevels.safeInputLimit;
 			// Between urgent (80%) and safeInputLimit (95%), still require reclaiming at least 3% of the
@@ -440,14 +524,11 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						: minSavings;
 			// An explicit or input-driven cycle reclaims at least the minimum, even below the target.
 			const goal = Math.max(0, projected - currentLevels.target, force ? minSavings : 0);
-			const pool: Segment[] = [];
-			let poolTokens = 0;
-			for (const segment of index.segments) {
-				if (pool.length > 0 && poolTokens * ratio >= goal * 1.5) break;
-				if ((poolTokens + segment.tokens) * ratio > MAX_POOL_TOKENS) break;
-				pool.push(segment);
-				poolTokens += segment.tokens;
-			}
+			const { pool, poolTokens } = selectCandidatePool(index.segments, {
+				goal,
+				ratio,
+				skippedCounts: skipMap,
+			});
 			if (pool.length === 0 || (!force && poolTokens * ratio * 0.9 < effectiveMinSavings)) {
 				noGain = { projected };
 				return skipped(pool.length === 0 ? "no_candidates" : "below_min_savings", index.segments.length);
@@ -461,6 +542,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			let after = projected;
 			let selected = 0;
 			let batch: SessionBoundaryDraft[] = [];
+			const committedSegmentIds = new Set<string>();
 			const batchId = `lc_${requests}_${hash(`${now()}:${pool.map((segment) => segment.id).join(",")}`).slice(0, 8)}`;
 			const effective = routesFor(ctx);
 			try {
@@ -471,6 +553,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						userTurns: userTurns(messages),
 						signal: cycleSignal(signalOverride ?? ctx.signal, timeoutMs),
 						tokenRatio: ratio,
+						urgent: urgent || force,
+						usageRatio: window > 0 ? projected / window : undefined,
 						routes: { summary: effective.summary.call, verification: effective.verification.call },
 						onProgress: (stage) => {
 							status(ctx, `Ambient Compact: ${stage}`);
@@ -523,6 +607,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 							outcome = "committed";
 							const entryById = new Map(branch.map((entry) => [entry.id, entry]));
 							batch = batchDrafts(batchId, orderPrefixSafe(edits, (id) => entryById.get(id)), { segments: archived });
+							for (const item of archived) committedSegmentIds.add(item.segmentId);
 						}
 					}
 				}
@@ -534,6 +619,13 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				showBarStatus(ctx);
 			}
 
+			const uncommittedSegmentIds =
+				outcome !== "aborted" && outcome !== "failed"
+					? pool.filter((segment) => !committedSegmentIds.has(segment.id)).map((segment) => segment.id)
+					: [];
+			for (const id of uncommittedSegmentIds) {
+				skippedCounts.set(id, (skipMap.get(id) ?? 0) + 1);
+			}
 			const state2: DynamicState = {
 				v: 1,
 				requestCount: requests,
@@ -544,6 +636,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				at: now(),
 				routes,
 				...(outcome === "committed" ? { batchId } : {}),
+				...(uncommittedSegmentIds.length > 0 ? { skippedSegmentIds: uncommittedSegmentIds } : {}),
 				...(note ? { note: note.slice(0, 600) } : {}),
 			};
 			await record(ctx, {
@@ -919,14 +1012,14 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			);
 			const minSavings = currentLevels ? Math.ceil(activeConfig.maintenance.minSavingsRatio * currentLevels.contextWindow) : 0;
 			const goal = currentLevels && currentTokens !== undefined ? Math.max(0, currentTokens - currentLevels.target) : 0;
-			let poolCount = 0;
-			let poolRawTokens = 0;
-			for (const segment of index.segments) {
-				if (poolCount > 0 && poolRawTokens * ratio >= goal * 1.5) break;
-				if ((poolRawTokens + segment.tokens) * ratio > MAX_POOL_TOKENS) break;
-				poolCount += 1;
-				poolRawTokens += segment.tokens;
-			}
+			const skipMap = mergedSkippedCounts(branch);
+			const hasFreshSegments = index.segments.some((segment) => (skipMap.get(segment.id) ?? 0) === 0);
+			const { pool: nextPool, poolTokens: poolRawTokens } = selectCandidatePool(index.segments, {
+				goal,
+				ratio,
+				skippedCounts: skipMap,
+			});
+			const poolCount = nextPool.length;
 			const poolRealTokens = Math.ceil(poolRawTokens * ratio);
 
 			// 2. Next trigger gate
@@ -951,6 +1044,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				} else if (
 					state &&
 					state.outcome !== "committed" &&
+					!(state.outcome !== "failed" && hasFreshSegments) &&
 					!routesChanged &&
 					!urgentRetryDue &&
 					currentTokens < state.projected + retryGrowthRatio * currentLevels.contextWindow
