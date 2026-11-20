@@ -266,14 +266,40 @@ export function segmentEdits(segment: Segment, carrierText: string): PlannedEdit
 	if (segment.kind === "episode") {
 		return [{ targetId: first.entryId, replacement: text }, ...rest.map((item) => ({ targetId: item.entryId, replacement: null }))];
 	}
-	// rounds: keep the first call (arguments compacted) and let its result carry the summary.
+	// rounds: keep the first call (arguments compacted with schema-valid keys) and let its result carry the summary.
 	const [firstCall] = toolCalls(first.message) as Array<Record<string, unknown> & { id: string }>;
 	const firstResult = rest.find((item) => (item.message as { toolCallId?: string }).toolCallId === firstCall?.id);
 	if (!firstCall || !firstResult) return [];
-	const stubCall = { ...firstCall, arguments: { compacted: "see the tool result for a summary of this span" } };
+	const stubCall = { ...firstCall, arguments: compactCallArguments(firstCall) };
 	return [
 		{ targetId: first.entryId, replacement: { content: [stubCall as never] } },
 		{ targetId: firstResult.entryId, replacement: text },
 		...rest.filter((item) => item !== firstResult).map((item) => ({ targetId: item.entryId, replacement: null })),
 	];
+}
+
+function compactCallArguments(call: Record<string, unknown>): Record<string, unknown> {
+	const name = typeof call.name === "string" ? call.name : "";
+	const raw = call.arguments;
+	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+		const entries = Object.entries(raw as Record<string, unknown>);
+		if (entries.length > 0 && !(entries.length === 1 && entries[0]?.[0] === "compacted")) {
+			const out: Record<string, unknown> = {};
+			for (const [k, v] of entries) {
+				if (typeof v === "string") {
+					out[k] = v.length > 48 ? `${v.slice(0, 48)}… [compacted]` : `${v} [compacted]`;
+				} else if (Array.isArray(v)) {
+					out[k] = [];
+				} else {
+					out[k] = v;
+				}
+			}
+			return out;
+		}
+	}
+	if (name === "bash" || name === "shell_command") return { command: ": # [compacted]" };
+	if (name === "exec_command") return { cmd: ": # [compacted]" };
+	if (name === "read") return { path: "[compacted]" };
+	if (name === "grep") return { pattern: "[compacted]" };
+	return { compacted: "see the tool result for a summary of this span" };
 }
