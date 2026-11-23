@@ -660,4 +660,30 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 		}
 	});
 
+	it("keeps context versions strictly monotonic across multi-step tool calls after an Active batch is queued", async () => {
+		const run = await session({ backgroundCycles: true });
+		try {
+			await run.prompt("task A", [...dumps("a", 4), fauxAssistantMessage("A done")]);
+			await run.prompt("task B", [...dumps("b", 4), fauxAssistantMessage("B done")]);
+			// Trigger `/ambient-compact now` while idle: queues BATCH_BEGIN (`Active` state).
+			await run.prompt("/ambient-compact now", []);
+			expect(findIncompleteBatches(run.sessionManager.getBranch())).toHaveLength(1);
+
+			const beforeCount = run.requests.length;
+			// Now run a multi-step tool turn (`user` request -> `toolResult` request -> final answer):
+			// BOTH the initial `user` request AND the subsequent `toolResult` request MUST see V2 (compacted),
+			// never reverting V2 → V1 → V2!
+			await run.prompt("multi-step turn", [dump("m1", 1), dump("m2", 1), fauxAssistantMessage("M done")]);
+			const turnRequests = run.requests.slice(beforeCount);
+			expect(turnRequests.length).toBe(3);
+			for (const req of turnRequests) {
+				expect(textOf(req)).toContain("Live Compact history summary v1");
+				expect(textOf(req)).not.toContain("a1 line 0000");
+			}
+			expect(findIncompleteBatches(run.sessionManager.getBranch())).toEqual([]);
+		} finally {
+			await run.dispose();
+		}
+	});
+
 });

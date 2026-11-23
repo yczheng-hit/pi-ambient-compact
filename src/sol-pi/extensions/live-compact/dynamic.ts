@@ -66,6 +66,7 @@ import {
 	pressureLevels,
 	requestInputTokens,
 } from "./budget.ts";
+import { computeCacheMetrics, formatCacheMetricsLine } from "./cache-metrics.ts";
 import type { BatchBegin } from "./commit.ts";
 import { BATCH_BEGIN, batchDrafts, completionDrafts, findIncompleteBatches, orderPrefixSafe, type PlannedEdit } from "./commit.ts";
 import { LIVE_CARD_HEADER } from "./card.ts";
@@ -228,20 +229,21 @@ export interface CandidatePoolOptions {
 	 * post-frontier tokens exceed the pool target, keeping the earlier prefix untouched in cache.
 	 */
 	readonly preferTail?: boolean;
+	/** When true (`/ambient-compact now` or emergency admission), sweep all fresh segments globally. */
+	readonly force?: boolean;
 }
 
 /**
  * Multi-tier candidate pool selection to prevent head-of-line blocking and preserve prompt cache:
  * - Scales the pool budget with `goal` (up to `MAX_DYNAMIC_POOL_TOKENS`) so a single cycle can
  *   reach `target` in one shot instead of splitting across multiple cache-invalidating cycles.
- * - Tier 1A selects fresh segments (`skippedCounts` = 0) that sit AFTER `lastEditedIndex` (the
- *   compacted frontier), so earlier already-compacted history stays 100% cached. When `preferTail`
- *   is enabled and post-frontier tokens exceed the target, it picks from the newest eligible
- *   segments backwards so the earlier post-frontier prefix also stays cached.
- * - Tier 1B falls back to fresh segments behind `lastEditedIndex` only when Tier 1A is empty or
- *   below `minTokens`.
+ * - Compares the prefix-preserving plan (`postFrontierFresh`, after `lastEditedIndex`, tail-first)
+ *   against the global sweep plan: normal automatic cycles keep the prefix-preserving plan whenever
+ *   it covers at least `Math.max(minTokens, goal * 0.5)`; if the post-frontier tail cannot provide
+ *   enough savings (or when `force` is true), it unlocks `behindFrontierFresh` so early obsolete
+ *   history is never permanently locked.
  * - Tier 2 backfills previously skipped segments ordered by skip/failure count ascending when
- *   Tier 1 was empty (or below `minTokens`).
+ *   fresh segments are empty (or below `minTokens`).
  */
 export function selectCandidatePool(
 	segments: readonly Segment[],
@@ -252,18 +254,23 @@ export function selectCandidatePool(
 		Math.min(MAX_DYNAMIC_POOL_TOKENS, Math.max(MAX_POOL_TOKENS, Math.ceil(options.goal * 2)));
 	const minTokens = options.minTokens ?? 1;
 	const lastEditedIndex = options.lastEditedIndex ?? -1;
-	const { goal, ratio, skippedCounts, preferTail } = options;
+	const { goal, ratio, skippedCounts, preferTail, force } = options;
 
 	const isAfterFrontier = (segment: Segment): boolean =>
 		lastEditedIndex < 0 || segment.messages.length === 0 || segment.messages[0]!.index > lastEditedIndex;
 
 	const postFrontierFresh: Segment[] = [];
 	const behindFrontierFresh: Segment[] = [];
+	const allFresh: Segment[] = [];
 	const previouslySkipped: Segment[] = [];
 	for (const segment of segments) {
-		if ((skippedCounts?.get(segment.id) ?? 0) > 0) previouslySkipped.push(segment);
-		else if (isAfterFrontier(segment)) postFrontierFresh.push(segment);
-		else behindFrontierFresh.push(segment);
+		if ((skippedCounts?.get(segment.id) ?? 0) > 0) {
+			previouslySkipped.push(segment);
+		} else {
+			allFresh.push(segment);
+			if (isAfterFrontier(segment)) postFrontierFresh.push(segment);
+			else behindFrontierFresh.push(segment);
+		}
 	}
 	previouslySkipped.sort((a, b) => {
 		const aPost = isAfterFrontier(a) ? 0 : 1;
@@ -291,11 +298,18 @@ export function selectCandidatePool(
 		ordered.push(...picked);
 	};
 
-	const postFrontierTotal = postFrontierFresh.reduce((sum, seg) => sum + seg.tokens, 0) * ratio;
-	const useTailOrder = Boolean(preferTail && postFrontierTotal > targetCap);
-	tryAdd(postFrontierFresh, useTailOrder);
-	if (ordered.length === 0 || poolTokens * ratio < minTokens) {
-		tryAdd(behindFrontierFresh, false);
+	if (force) {
+		// Explicit manual `/ambient-compact now` or emergency input admission: global sweep from the start.
+		tryAdd(allFresh, false);
+	} else {
+		const postFrontierTotal = postFrontierFresh.reduce((sum, seg) => sum + seg.tokens, 0) * ratio;
+		const useTailOrder = Boolean(preferTail && postFrontierTotal > targetCap);
+		tryAdd(postFrontierFresh, useTailOrder);
+		const prefixPlanSufficient =
+			ordered.length > 0 && poolTokens * ratio >= Math.max(minTokens, Math.floor(goal * 0.5));
+		if (!prefixPlanSufficient && behindFrontierFresh.length > 0) {
+			tryAdd(behindFrontierFresh, false);
+		}
 	}
 	if (ordered.length === 0 || poolTokens * ratio < minTokens) {
 		tryAdd(previouslySkipped, false);
@@ -318,6 +332,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		let running = false;
 		let bgAbort: AbortController | undefined;
 		let activeBgPromise: Promise<void> | undefined;
+		let inToolLoop = false;
+		let stagedBgResult: { readonly result: CycleResult; readonly projectedAtStart: number } | undefined;
 		const skippedCounts = new Map<string, number>();
 		const routeStore = new RouteStore(config);
 		const configResolver = new LiveCompactConfigResolver(config);
@@ -348,6 +364,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			bgAbort = undefined;
 			activeBgPromise = undefined;
 			running = false;
+			inToolLoop = false;
+			stagedBgResult = undefined;
 			calibration = undefined;
 			lastAfter = undefined;
 			skippedCounts.clear();
@@ -570,7 +588,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				minTokens: effectiveMinSavings,
 				skippedCounts: skipMap,
 				lastEditedIndex: index.lastEditedIndex,
-				preferTail: true,
+				preferTail: !force,
+				force,
 			});
 			if (pool.length === 0 || (!force && poolTokens * ratio * 0.9 < effectiveMinSavings)) {
 				noGain = { projected };
@@ -795,20 +814,52 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			};
 
 			// Finish an interrupted or out-of-boundary batch before anything else.
-			const incomplete = findIncompleteBatches(branch);
+			const hasToolResults = trigger === "turn_end" && Array.isArray(event.toolResults) && event.toolResults.length > 0;
+			inToolLoop = hasToolResults;
 			const isMidToolLoop =
 				options.backgroundCycles === true &&
-				trigger === "turn_end" &&
-				Array.isArray(event.toolResults) &&
-				event.toolResults.length > 0 &&
+				hasToolResults &&
 				currentLevels !== undefined &&
 				lastAfter !== undefined &&
 				lastAfter < currentLevels.ceiling;
-			if (incomplete.length > 0 && !(isMidToolLoop && incomplete.every((b) => b.landed.length === 0))) {
+
+			// 1. Once a batch is Active (BATCH_BEGIN on the branch), ALWAYS complete it at the very next
+			//    boundary so context versions move strictly forward (never V2 → V1 → V2).
+			const incomplete = findIncompleteBatches(branch);
+			if (incomplete.length > 0) {
 				await record(ctx, { event: "batch_completed", batches: incomplete.map((batch) => batch.batchId) });
 				if (lastAfter !== undefined) admit(lastAfter);
 				showBarStatus(ctx);
 				return { entries: [...event.entries, ...incomplete.flatMap(completionDrafts)] };
+			}
+
+			// 2. If a background cycle finished while a tool loop was active (`Ready` state in `stagedBgResult`)
+			//    and we have now reached a clean activation boundary (`!isMidToolLoop`), promote and persist it.
+			if (stagedBgResult && !isMidToolLoop) {
+				const staged = stagedBgResult;
+				stagedBgResult = undefined;
+				const branchIds = new Set(branch.map((entry) => entry.id));
+				const alreadyEditedIds = new Set(
+					branch.flatMap((entry) => (entry.type === "context_edit" ? [entry.targetId] : [])),
+				);
+				const edits = staged.result.batch.flatMap((draft) => (draft.type === "context_edit" ? [draft] : []));
+				const stillValid = edits.every(
+					(edit) => branchIds.has(edit.targetId) && !alreadyEditedIds.has(edit.targetId),
+				);
+				if (stillValid) {
+					const reclaimed = Math.max(0, staged.projectedAtStart - staged.result.after);
+					lastAfter = Math.max(0, (lastAfter ?? staged.projectedAtStart) - reclaimed);
+					report(staged.result.report);
+					showBarStatus(ctx);
+					admit(lastAfter);
+					return {
+						entries: [
+							...event.entries,
+							...staged.result.batch,
+							{ type: "custom", customType: DYNAMIC_STATE_ENTRY, data: staged.result.state } as SessionBoundaryDraft,
+						],
+					};
+				}
 			}
 
 			if (!currentLevels || lastAfter === undefined) return;
@@ -878,6 +929,12 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 								(edit) => branchIds.has(edit.targetId) && !alreadyEditedIds.has(edit.targetId),
 							);
 							if (stillValid) {
+								if (inToolLoop && levels && (lastAfter ?? projected) < levels.ceiling) {
+									// Ready state: hold the finished batch in memory until the active normal-band
+									// tool loop settles so we never switch context versions mid-tool-loop.
+									stagedBgResult = { result: bgResult, projectedAtStart: projected };
+									return;
+								}
 								const reclaimed = Math.max(0, projected - bgResult.after);
 								pi.appendEntry(begin.customType, begin.data);
 								lastAfter = Math.max(0, (lastAfter ?? projected) - reclaimed);
@@ -935,21 +992,12 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		pi.on("turn_end", (event, ctx) => boundary("turn_end", event as BoundaryEvent, ctx));
 		pi.on("agent_before_settle", (event, ctx) => boundary("agent_before_settle", event as unknown as BoundaryEvent, ctx));
 
-		// Before an interrupted or out-of-boundary batch is persisted, send its edits in memory.
+		// Before an interrupted or out-of-boundary Active batch is persisted, send its edits in memory
+		// on EVERY request (both user and toolResult) so context versions are strictly monotonic.
 		pi.on("context", (event, ctx) => {
 			const branch = ctx.sessionManager.getBranch();
 			const incomplete = findIncompleteBatches(branch);
 			if (incomplete.length === 0) return;
-			if (
-				options.backgroundCycles === true &&
-				incomplete.every((batch) => batch.landed.length === 0) &&
-				event.messages.at(-1)?.role === "toolResult" &&
-				levels !== undefined &&
-				lastAfter !== undefined &&
-				lastAfter < levels.ceiling
-			) {
-				return;
-			}
 			const byId = new Map(branch.map((entry) => [entry.id, entry]));
 			const replace = new Map<string, unknown>();
 			const omit = new Set<string>();
@@ -1169,6 +1217,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					? `levels: start ${percent(currentLevels.start, window)} (${currentLevels.start.toLocaleString("en-US")}), target ${percent(currentLevels.target, window)} (${currentLevels.target.toLocaleString("en-US")}), urgent ${percent(currentLevels.ceiling, window)} (${currentLevels.ceiling.toLocaleString("en-US")}), safe input ${percent(currentLevels.safeInputLimit, window)} (${currentLevels.safeInputLimit.toLocaleString("en-US")}) of ${window?.toLocaleString("en-US")} tokens`
 					: "levels: unknown until the first completed turn with a known model window",
 				`context: ${currentTokens !== undefined && window ? `${currentTokens.toLocaleString("en-US")} / ${window.toLocaleString("en-US")} tokens (${percent(currentTokens, window)})` : `${percent(currentTokens, window)} after the last boundary`} · calibration ${ratio.toFixed(2)}x`,
+				formatCacheMetricsLine(computeCacheMetrics(branch)),
 				gateLine,
 				`candidates: ${index.segments.length} segment(s) (${episodes} episode(s), ${roundRuns} tool-round run(s)), ~${totalCandidateTokens.toLocaleString("en-US")} tokens (~${poolRealTokens.toLocaleString("en-US")} in next pool, min savings ${minSavings.toLocaleString("en-US")})`,
 				`protected: recent rounds ${index.kept.recent_round ?? 0}, already edited ${index.kept.edited ?? 0}, errors ${index.kept.error_result ?? 0}, small ${index.kept.small ?? 0}`,

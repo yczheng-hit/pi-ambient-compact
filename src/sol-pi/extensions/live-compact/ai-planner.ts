@@ -202,8 +202,16 @@ function outputBudget(call: LiveCompactCallConfig, model: Model<Api>, wanted: nu
  * Drop the newest candidates until the prompt fits the route's window. `ratio` turns the
  * character estimate into real tokens, as measured against provider usage for this session.
  */
-function fitCandidates(candidates: readonly Segment[], model: Model<Api>, overheadTokens: number, outputTokens: number, ratio: number): Segment[] {
-	const room = Math.floor(model.contextWindow * PROMPT_WINDOW_SHARE) - outputTokens - overheadTokens;
+function fitCandidates(
+	candidates: readonly Segment[],
+	summaryModel: Model<Api>,
+	verifyModel: Model<Api>,
+	overheadTokens: number,
+	outputTokens: number,
+	ratio: number,
+): Segment[] {
+	const effectiveWindow = Math.min(summaryModel.contextWindow, verifyModel.contextWindow);
+	const room = Math.floor(effectiveWindow * PROMPT_WINDOW_SHARE) - outputTokens - overheadTokens;
 	const fitted: Segment[] = [];
 	let used = 0;
 	for (const segment of candidates) {
@@ -274,7 +282,7 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 		const generationFloor = Math.min(16_384, Math.floor(summaryModel.contextWindow * 0.2));
 		const generationTokens = outputBudget(routes.summary, summaryModel, Math.max(wanted, generationFloor));
 		const overhead = estimateTextTokens(GENERATE_SYSTEM) + estimateTextTokens(request.userTurns.join("\n")) + 500;
-		const candidates = fitCandidates(request.candidates, summaryModel, overhead, generationTokens, ratio);
+		const candidates = fitCandidates(request.candidates, summaryModel, verifyModel, overhead, generationTokens, ratio);
 		if (candidates.length < request.candidates.length) notes.push(`${request.candidates.length - candidates.length} candidate(s) did not fit the summary model`);
 		if (candidates.length === 0) return done([]);
 		const byId = new Map(candidates.map((segment) => [segment.id, segment]));
@@ -308,12 +316,28 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 			notes.push(...parsed.notes);
 			if (parsed.selections.length === 0) break;
 
-			const pairs = parsed.selections.map((selection) => ({ segment: byId.get(selection.segmentId)!, summary: selection.summary }));
-			const verifyText = verifyPrompt(pairs);
-			if ((estimateTextTokens(verifyText) + estimateTextTokens(VERIFY_SYSTEM)) * ratio > verifyModel.contextWindow * PROMPT_WINDOW_SHARE) {
+			const rawPairs = parsed.selections.map((selection) => ({
+				selection,
+				segment: byId.get(selection.segmentId)!,
+				summary: selection.summary,
+			}));
+			const verifyRoom = verifyModel.contextWindow * PROMPT_WINDOW_SHARE - estimateTextTokens(VERIFY_SYSTEM) * ratio;
+			const pairs: Array<{ readonly selection: PlanSelection; readonly segment: Segment; readonly summary: string }> = [];
+			let verifyUsed = 0;
+			for (const item of rawPairs) {
+				const pairTokens = estimateTextTokens(verifyPrompt([item])) * ratio;
+				if (verifyUsed + pairTokens > verifyRoom) continue;
+				pairs.push(item);
+				verifyUsed += pairTokens;
+			}
+			if (pairs.length < rawPairs.length) {
+				notes.push(`${rawPairs.length - pairs.length} selected segment(s) did not fit the verification model`);
+			}
+			if (pairs.length === 0) {
 				notes.push("selected segments do not fit the verification model");
 				break;
 			}
+			const verifyText = verifyPrompt(pairs);
 			request.onProgress?.(`verifying ${pairs.length} summary(ies) against originals…`);
 			const verifyWanted = Math.max(16_384, 2_000 + pairs.length * 500);
 			const verified = await call(
@@ -329,7 +353,7 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 			}
 			const verdicts = parseVerdicts(verified.text);
 			feedback = new Map();
-			for (const selection of parsed.selections) {
+			for (const { selection } of pairs) {
 				const verdict = verdicts.get(selection.segmentId);
 				if (verdict?.ok) accepted.push(selection);
 				else feedback.set(selection.segmentId, verdict?.problems ?? ["no verdict"]);

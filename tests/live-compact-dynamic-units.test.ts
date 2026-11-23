@@ -699,5 +699,44 @@ describe("codex-settings style TUI settings menu & store", () => {
 		});
 		expect(scaled.pool.map((s) => s.id)).toEqual(["seg_post_1", "seg_post_2", "seg_post_3"]);
 		expect(scaled.poolTokens).toBe(330_000);
+
+		// 3. Global sweep fallback: when force=true (or when post-frontier alone < goal * 0.5), behind-frontier segments are unlocked!
+		const forcedSweep = selectCandidatePool(segments, {
+			goal: 140_000,
+			ratio: 1,
+			minTokens: 50_000,
+			lastEditedIndex: 50,
+			force: true,
+		});
+		expect(forcedSweep.pool[0]?.id).toBe("seg_leftover_early");
+	});
+
+	it("computes weighted overall, recent, stable, and post-compaction cache metrics", async () => {
+		const { computeCacheMetrics, formatCacheMetricsLine } = await import(
+			"../src/sol-pi/extensions/live-compact/cache-metrics.ts"
+		);
+		const branch = [
+			{ id: "e1", type: "message", timestamp: "2026-11-20T08:00:00.000Z", message: { role: "assistant", usage: { input: 100_000, cacheRead: 0, cacheWrite: 0 } } },
+			{ id: "e2", type: "message", timestamp: "2026-11-20T08:01:00.000Z", message: { role: "assistant", usage: { input: 2_000, cacheRead: 98_000, cacheWrite: 0 } } },
+			{
+				id: "b1",
+				type: "custom",
+				customType: "sol-pi-live-compact-batch-begin",
+				timestamp: "2026-11-20T08:01:30.000Z",
+				data: { v: 1, batchId: "lc_test", edits: [{ targetId: "e2", replacement: null }] },
+			},
+			{ id: "e3", type: "message", timestamp: "2026-11-20T08:02:00.000Z", message: { role: "assistant", usage: { input: 10_000, cacheRead: 70_000, cacheWrite: 0 } } },
+			{ id: "e4", type: "message", timestamp: "2026-11-20T08:03:00.000Z", message: { role: "assistant", usage: { input: 1_000, cacheRead: 79_000, cacheWrite: 0 } } },
+		] as never;
+		const summary = computeCacheMetrics(branch);
+		expect(summary.overall.requests).toBe(4);
+		expect(summary.postCompaction.requests).toBe(1);
+		expect(summary.postCompaction.hitRatio).toBeCloseTo(70_000 / 80_000, 4);
+		expect(summary.stableRun.hitRatio).toBeGreaterThan(0.6);
+		expect(summary.lastBatchImpact?.earliestTargetIndex).toBe(1);
+		const line = formatCacheMetricsLine(summary);
+		expect(line).toContain("cache: overall");
+		expect(line).toContain("post-compact 1st-req 87.5% (1)");
+		expect(line).toContain("last edit at ~50% of history");
 	});
 });
