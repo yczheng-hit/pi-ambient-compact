@@ -65,6 +65,8 @@ export interface SegmentIndex {
 	/** Rounds kept verbatim, by reason. */
 	readonly kept: Readonly<Record<string, number>>;
 	readonly messages: readonly IndexedMessage[];
+	/** Highest `index` among `messages` with `edited: true`, or `-1` when no message is edited yet. */
+	readonly lastEditedIndex?: number;
 }
 
 export interface SegmentOptions {
@@ -242,7 +244,8 @@ export function indexSegments(entries: readonly ProjectedSessionEntry[], options
 		if (isLatest && group.final) keep("latest_answer");
 	});
 
-	return { segments, kept, messages };
+	const lastEditedIndex = messages.findLast((item) => item.edited)?.index ?? -1;
+	return { segments, kept, messages, lastEditedIndex };
 }
 
 /** The text a summary carrier holds: a fixed header, then the summary. */

@@ -81,6 +81,8 @@ export const DYNAMIC_STATE_ENTRY = "sol-pi-live-compact-dynamic-v1";
 export const DYNAMIC_STATUS_KEY = "sol-pi-live-compact";
 /** Largest candidate pool handed to one planning call, in real (calibrated) tokens. */
 export const MAX_POOL_TOKENS = 150_000;
+/** Upper cap when scaling the candidate pool to match a large reclaim goal (`start - target`) in one cycle. */
+export const MAX_DYNAMIC_POOL_TOKENS = 450_000;
 /** Above the urgent level, a failed cycle is retried after this long without waiting for growth. */
 export const URGENT_RETRY_MS = 120_000;
 
@@ -219,48 +221,86 @@ export interface CandidatePoolOptions {
 	readonly maxPoolTokens?: number;
 	readonly minTokens?: number;
 	readonly skippedCounts?: ReadonlyMap<string, number>;
+	/** Highest message index already edited by an earlier batch (`-1` when none). */
+	readonly lastEditedIndex?: number;
+	/**
+	 * When true, select from the newer end (tail) of post-frontier segments backwards when total
+	 * post-frontier tokens exceed the pool target, keeping the earlier prefix untouched in cache.
+	 */
+	readonly preferTail?: boolean;
 }
 
 /**
- * Two-pass candidate pool selection to prevent head-of-line blocking:
- * - Pass 1 selects segments that have not recently failed or been skipped (`skippedCounts` = 0),
- *   using `continue` (not `break`) when a single large segment exceeds the remaining `maxPoolTokens`
- *   budget so smaller subsequent segments can still enter the pool.
- * - Pass 2 backfills previously skipped segments ordered by skip/failure count ascending when
- *   Pass 1 was empty (or below `minTokens`) and room remains under `maxPoolTokens`.
+ * Multi-tier candidate pool selection to prevent head-of-line blocking and preserve prompt cache:
+ * - Scales the pool budget with `goal` (up to `MAX_DYNAMIC_POOL_TOKENS`) so a single cycle can
+ *   reach `target` in one shot instead of splitting across multiple cache-invalidating cycles.
+ * - Tier 1A selects fresh segments (`skippedCounts` = 0) that sit AFTER `lastEditedIndex` (the
+ *   compacted frontier), so earlier already-compacted history stays 100% cached. When `preferTail`
+ *   is enabled and post-frontier tokens exceed the target, it picks from the newest eligible
+ *   segments backwards so the earlier post-frontier prefix also stays cached.
+ * - Tier 1B falls back to fresh segments behind `lastEditedIndex` only when Tier 1A is empty or
+ *   below `minTokens`.
+ * - Tier 2 backfills previously skipped segments ordered by skip/failure count ascending when
+ *   Tier 1 was empty (or below `minTokens`).
  */
 export function selectCandidatePool(
 	segments: readonly Segment[],
 	options: CandidatePoolOptions,
 ): { readonly pool: Segment[]; readonly poolTokens: number } {
-	const maxPoolTokens = options.maxPoolTokens ?? MAX_POOL_TOKENS;
+	const maxPoolTokens =
+		options.maxPoolTokens ??
+		Math.min(MAX_DYNAMIC_POOL_TOKENS, Math.max(MAX_POOL_TOKENS, Math.ceil(options.goal * 2)));
 	const minTokens = options.minTokens ?? 1;
-	const { goal, ratio, skippedCounts } = options;
-	const fresh: Segment[] = [];
+	const lastEditedIndex = options.lastEditedIndex ?? -1;
+	const { goal, ratio, skippedCounts, preferTail } = options;
+
+	const isAfterFrontier = (segment: Segment): boolean =>
+		lastEditedIndex < 0 || segment.messages.length === 0 || segment.messages[0]!.index > lastEditedIndex;
+
+	const postFrontierFresh: Segment[] = [];
+	const behindFrontierFresh: Segment[] = [];
 	const previouslySkipped: Segment[] = [];
 	for (const segment of segments) {
 		if ((skippedCounts?.get(segment.id) ?? 0) > 0) previouslySkipped.push(segment);
-		else fresh.push(segment);
+		else if (isAfterFrontier(segment)) postFrontierFresh.push(segment);
+		else behindFrontierFresh.push(segment);
 	}
-	previouslySkipped.sort(
-		(a, b) => (skippedCounts?.get(a.id) ?? 0) - (skippedCounts?.get(b.id) ?? 0),
-	);
+	previouslySkipped.sort((a, b) => {
+		const aPost = isAfterFrontier(a) ? 0 : 1;
+		const bPost = isAfterFrontier(b) ? 0 : 1;
+		if (aPost !== bPost) return aPost - bPost;
+		return (skippedCounts?.get(a.id) ?? 0) - (skippedCounts?.get(b.id) ?? 0);
+	});
 
-	const pool: Segment[] = [];
+	const selectedIds = new Set<string>();
+	const ordered: Segment[] = [];
 	let poolTokens = 0;
-	const tryAdd = (candidates: readonly Segment[]) => {
-		for (const segment of candidates) {
-			if (pool.length > 0 && poolTokens * ratio >= goal * 1.5) break;
+	const targetCap = Math.min(maxPoolTokens, Math.max(minTokens, goal * 1.5));
+	const tryAdd = (candidates: readonly Segment[], reverseOrder = false) => {
+		const list = reverseOrder ? [...candidates].reverse() : candidates;
+		const picked: Segment[] = [];
+		for (const segment of list) {
+			if (selectedIds.has(segment.id)) continue;
+			if (selectedIds.size > 0 && poolTokens * ratio >= goal * 1.5) break;
 			if ((poolTokens + segment.tokens) * ratio > maxPoolTokens) continue;
-			pool.push(segment);
+			selectedIds.add(segment.id);
+			picked.push(segment);
 			poolTokens += segment.tokens;
 		}
+		if (reverseOrder) picked.reverse();
+		ordered.push(...picked);
 	};
-	tryAdd(fresh);
-	if (pool.length === 0 || poolTokens * ratio < minTokens) {
-		tryAdd(previouslySkipped);
+
+	const postFrontierTotal = postFrontierFresh.reduce((sum, seg) => sum + seg.tokens, 0) * ratio;
+	const useTailOrder = Boolean(preferTail && postFrontierTotal > targetCap);
+	tryAdd(postFrontierFresh, useTailOrder);
+	if (ordered.length === 0 || poolTokens * ratio < minTokens) {
+		tryAdd(behindFrontierFresh, false);
 	}
-	return { pool, poolTokens };
+	if (ordered.length === 0 || poolTokens * ratio < minTokens) {
+		tryAdd(previouslySkipped, false);
+	}
+	return { pool: ordered, poolTokens };
 }
 
 export function createDynamicCompactExtension(options: DynamicCompactOptions): ExtensionFactory {
@@ -527,7 +567,10 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const { pool, poolTokens } = selectCandidatePool(index.segments, {
 				goal,
 				ratio,
+				minTokens: effectiveMinSavings,
 				skippedCounts: skipMap,
+				lastEditedIndex: index.lastEditedIndex,
+				preferTail: true,
 			});
 			if (pool.length === 0 || (!force && poolTokens * ratio * 0.9 < effectiveMinSavings)) {
 				noGain = { projected };
@@ -753,7 +796,15 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 
 			// Finish an interrupted or out-of-boundary batch before anything else.
 			const incomplete = findIncompleteBatches(branch);
-			if (incomplete.length > 0) {
+			const isMidToolLoop =
+				options.backgroundCycles === true &&
+				trigger === "turn_end" &&
+				Array.isArray(event.toolResults) &&
+				event.toolResults.length > 0 &&
+				currentLevels !== undefined &&
+				lastAfter !== undefined &&
+				lastAfter < currentLevels.ceiling;
+			if (incomplete.length > 0 && !(isMidToolLoop && incomplete.every((b) => b.landed.length === 0))) {
 				await record(ctx, { event: "batch_completed", batches: incomplete.map((batch) => batch.batchId) });
 				if (lastAfter !== undefined) admit(lastAfter);
 				showBarStatus(ctx);
@@ -777,6 +828,13 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				}
 				showBarStatus(ctx);
 				admit(projected);
+				return;
+			}
+			// During an active multi-step tool loop in the normal band (< ceiling), defer compaction to
+			// the end of the turn (turn_end with no tool calls / agent_before_settle) so rapid tool
+			// steps keep a 100% hot prefix cache without mid-loop invalidations.
+			if (isMidToolLoop) {
+				showBarStatus(ctx);
 				return;
 			}
 
@@ -882,6 +940,16 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const branch = ctx.sessionManager.getBranch();
 			const incomplete = findIncompleteBatches(branch);
 			if (incomplete.length === 0) return;
+			if (
+				options.backgroundCycles === true &&
+				incomplete.every((batch) => batch.landed.length === 0) &&
+				event.messages.at(-1)?.role === "toolResult" &&
+				levels !== undefined &&
+				lastAfter !== undefined &&
+				lastAfter < levels.ceiling
+			) {
+				return;
+			}
 			const byId = new Map(branch.map((entry) => [entry.id, entry]));
 			const replace = new Map<string, unknown>();
 			const omit = new Set<string>();
@@ -1017,7 +1085,10 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const { pool: nextPool, poolTokens: poolRawTokens } = selectCandidatePool(index.segments, {
 				goal,
 				ratio,
+				minTokens: minSavings,
 				skippedCounts: skipMap,
+				lastEditedIndex: index.lastEditedIndex,
+				preferTail: true,
 			});
 			const poolCount = nextPool.length;
 			const poolRealTokens = Math.ceil(poolRawTokens * ratio);

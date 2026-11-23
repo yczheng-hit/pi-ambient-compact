@@ -661,4 +661,43 @@ describe("codex-settings style TUI settings menu & store", () => {
 		expect(prompts[0]).toContain("Context pressure: URGENT (88%)");
 		expect(prompts[0]).toContain("You MUST select older exploratory reads");
 	});
+
+	it("preserves the cached prefix by preferring post-frontier and tail segments, and scales the pool cap with goal", async () => {
+		const { selectCandidatePool } = await import("../src/sol-pi/extensions/live-compact/dynamic.ts");
+		const segAt = (id: string, msgIndex: number, tokens: number): Segment => ({
+			id,
+			kind: "episode",
+			messages: [{ entryId: id, message: { role: "assistant", content: [] } as unknown as AgentMessage, index: msgIndex, edited: false }],
+			tokens,
+			episodeStart: msgIndex - 1,
+		});
+		const segments = [
+			segAt("seg_leftover_early", 10, 20_000), // behind lastEditedIndex (50)
+			segAt("seg_post_1", 60, 100_000),
+			segAt("seg_post_2", 70, 120_000),
+			segAt("seg_post_3", 80, 110_000),
+		];
+		// 1. With lastEditedIndex=50 and preferTail=true for goal=140k (goal*1.5 = 210k):
+		//    - seg_leftover_early (index 10 <= 50) is NOT touched so prefix 0..50 stays 100% cached;
+		//    - within post-frontier segments (330k > 210k), tail segments seg_post_2 + seg_post_3 (230k >= 210k) are picked in chronological order, keeping seg_post_1 cached too!
+		const selected = selectCandidatePool(segments, {
+			goal: 140_000,
+			ratio: 1,
+			minTokens: 50_000,
+			lastEditedIndex: 50,
+			preferTail: true,
+		});
+		expect(selected.pool.map((s) => s.id)).toEqual(["seg_post_2", "seg_post_3"]);
+
+		// 2. Dynamic pool scaling: when goal is 250k (goal*1.5 = 375k > 150k default floor), the pool scales up to include all 330k post-frontier tokens in one shot!
+		const scaled = selectCandidatePool(segments, {
+			goal: 250_000,
+			ratio: 1,
+			minTokens: 50_000,
+			lastEditedIndex: 50,
+			preferTail: true,
+		});
+		expect(scaled.pool.map((s) => s.id)).toEqual(["seg_post_1", "seg_post_2", "seg_post_3"]);
+		expect(scaled.poolTokens).toBe(330_000);
+	});
 });
