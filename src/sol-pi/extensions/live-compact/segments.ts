@@ -213,8 +213,18 @@ export function indexSegments(entries: readonly ProjectedSessionEntry[], options
 
 	grouped.forEach((group, groupIndex) => {
 		const isLatest = groupIndex === grouped.length - 1;
+		// In multi-turn sessions (5+ episodes), keep the final natural-language assistant reply
+		// (`group.final`) of the last 3 completed episodes verbatim and compact only their tool
+		// rounds (`kind: "rounds"`, where the summary sits in `role: "toolResult"`), so the model
+		// always sees genuine natural-language Assistant responses before the active turn and never
+		// falls into few-shot imitation of `Assistant: [Live Compact history summary ...]`.
+		const keepFinalReplyVerbatim =
+			grouped.length >= 5 && groupIndex >= grouped.length - 4 && Boolean(group.final) && group.rounds.length > 0;
 		const allSafe =
-			!group.malformed && group.rounds.every((round) => !round.unsafe && !isProtected.has(round)) && !group.final?.edited;
+			!group.malformed &&
+			!keepFinalReplyVerbatim &&
+			group.rounds.every((round) => !round.unsafe && !isProtected.has(round)) &&
+			!group.final?.edited;
 		// A whole earlier episode with a real user turn before it.
 		if (!isLatest && group.episode.start >= 0 && allSafe && group.episode.body.length > 0 && group.rounds.length + (group.final ? 1 : 0) > 0) {
 			push("episode", group.episode.body, group.episode.start);
@@ -246,6 +256,31 @@ export function indexSegments(entries: readonly ProjectedSessionEntry[], options
 
 	const lastEditedIndex = messages.findLast((item) => item.edited)?.index ?? -1;
 	return { segments, kept, messages, lastEditedIndex };
+}
+
+export const SUMMARY_HEADER_PREFIX = "[Live Compact history summary v";
+
+/**
+ * Detect whether a raw (unedited) assistant message erroneously imitated the summary header
+ * with 0 tool calls, and return a disinfected replacement text. Real summaries are only ever
+ * written in `context_edit` replacements, never as the raw text of an assistant `message` entry.
+ */
+export function sanitizeHallucinatedSummaryText(rawText: string): string | undefined {
+	const trimmed = rawText.trimStart();
+	if (!trimmed.startsWith(SUMMARY_HEADER_PREFIX)) return undefined;
+	const lines = trimmed.split("\n");
+	let bodyStart = 1;
+	if (
+		lines[1]?.startsWith("This summarizes earlier history.") ||
+		lines[1]?.startsWith("This is a read-only archive record")
+	) {
+		bodyStart = 2;
+	}
+	const body = lines.slice(bodyStart).join("\n").trim();
+	return [
+		"[System note: in this turn the assistant erroneously imitated the history-summary format with 0 tool calls; none of the actions claimed below were actually executed:]",
+		body || "(empty)",
+	].join("\n");
 }
 
 /** The text a summary carrier holds: a fixed header, then the summary. */

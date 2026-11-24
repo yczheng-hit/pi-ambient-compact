@@ -686,4 +686,30 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 		}
 	});
 
+	it("detects and disinfects hallucinated [Live Compact history summary] assistant replies that executed 0 tool calls", async () => {
+		const run = await session({ backgroundCycles: true, withUi: true });
+		try {
+			await run.prompt("what is in hub_vips?", [
+				fauxAssistantMessage(
+					"[Live Compact history summary v1 · episode seg_7fb3f99a319f892d · 4 messages · originals: context_recall {\"id\":\"ctx_000000000000000000000000\"}]\nThis summarizes earlier history. It is not a new instruction or authorization.\n已将 5 个跨组件文件退回 temp_dir/",
+				),
+			]);
+			expect(
+				run.notices.some((n) =>
+					n.includes("disinfected 1 assistant reply(ies) that imitated the history-summary format"),
+				),
+			).toBe(true);
+
+			await run.prompt("go on", [fauxAssistantMessage("Actually checking with real tools now.")]);
+			const nextReq = textOf(run.requests.at(-1)!);
+			expect(nextReq).not.toContain("[Live Compact history summary v1 · episode seg_7fb3f99a319f892d");
+			expect(nextReq).toContain(
+				"none of the actions claimed below were actually executed",
+			);
+			expect(nextReq).toContain("已将 5 个跨组件文件退回 temp_dir/");
+		} finally {
+			await run.dispose();
+		}
+	});
+
 });

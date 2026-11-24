@@ -75,7 +75,7 @@ import { type Planner, type PlanUsage, renderSegment, userTurns } from "./planne
 import { describeRoute, parseRouteArgument, ROUTE_KINDS, ROUTES_ENTRY, type RouteKind, RouteStore, writeGlobalRoute } from "./routes.ts";
 import { buildLiveCompactSettingFields, canOpenSettingsTui, openLiveCompactSettingsPane } from "./settings-pane.ts";
 import { LiveCompactConfigResolver } from "./settings-store.ts";
-import { indexSegments, type Segment, segmentEdits, summaryCarrierText } from "./segments.ts";
+import { indexSegments, sanitizeHallucinatedSummaryText, type Segment, segmentEdits, summaryCarrierText } from "./segments.ts";
 import { validateToolPairing } from "./validator.ts";
 
 export const DYNAMIC_STATE_ENTRY = "sol-pi-live-compact-dynamic-v1";
@@ -812,6 +812,40 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					ctx.abort();
 				}
 			};
+			// Detect and permanently disinfect any raw (unedited) assistant message on the branch that
+			// erroneously imitated the `[Live Compact history summary v1 ...]` format with 0 tool calls.
+			const editedTargetIds = new Set<string>(
+				branch.flatMap((entry) => (entry.type === "context_edit" ? [entry.targetId] : [])),
+			);
+			const disinfectDrafts: SessionBoundaryDraft[] = [];
+			for (const entry of branch) {
+				if (entry.type !== "message" || entry.message.role !== "assistant" || editedTargetIds.has(entry.id)) continue;
+				const content = (entry.message as { content?: unknown }).content;
+				if (!Array.isArray(content) || content.some((b: { type?: string }) => b?.type === "toolCall")) continue;
+				const rawText = content
+					.filter((b: { type?: string }) => b?.type === "text")
+					.map((b: { text?: unknown }) => (typeof b.text === "string" ? b.text : ""))
+					.join("\n");
+				const sanitized = sanitizeHallucinatedSummaryText(rawText);
+				if (sanitized !== undefined) {
+					disinfectDrafts.push({
+						type: "context_edit",
+						targetId: entry.id,
+						replacement: { content: [{ type: "text", text: sanitized }] },
+					});
+				}
+			}
+			if (disinfectDrafts.length > 0) {
+				notify(
+					ctx,
+					`Ambient Compact: disinfected ${disinfectDrafts.length} assistant reply(ies) that imitated the history-summary format without executing tools.`,
+					"warning",
+				);
+			}
+			const withDisinfected = (extra: readonly SessionBoundaryDraft[] = []): { entries: SessionBoundaryDraft[] } | undefined => {
+				const combined = [...event.entries, ...disinfectDrafts, ...extra];
+				return combined.length > event.entries.length ? { entries: combined } : undefined;
+			};
 
 			// Finish an interrupted or out-of-boundary batch before anything else.
 			const hasToolResults = trigger === "turn_end" && Array.isArray(event.toolResults) && event.toolResults.length > 0;
@@ -830,7 +864,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				await record(ctx, { event: "batch_completed", batches: incomplete.map((batch) => batch.batchId) });
 				if (lastAfter !== undefined) admit(lastAfter);
 				showBarStatus(ctx);
-				return { entries: [...event.entries, ...incomplete.flatMap(completionDrafts)] };
+				return { entries: [...event.entries, ...disinfectDrafts, ...incomplete.flatMap(completionDrafts)] };
 			}
 
 			// 2. If a background cycle finished while a tool loop was active (`Ready` state in `stagedBgResult`)
@@ -862,7 +896,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				}
 			}
 
-			if (!currentLevels || lastAfter === undefined) return;
+			if (!currentLevels || lastAfter === undefined) return withDisinfected();
 			let projected = lastAfter;
 			if (running) {
 				// If a concurrent turn crosses the hard safeInputLimit while a background cycle is in
@@ -879,14 +913,14 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				}
 				showBarStatus(ctx);
 				admit(projected);
-				return;
+				return withDisinfected();
 			}
 			// During an active multi-step tool loop in the normal band (< ceiling), defer compaction to
 			// the end of the turn (turn_end with no tool calls / agent_before_settle) so rapid tool
 			// steps keep a 100% hot prefix cache without mid-loop invalidations.
 			if (isMidToolLoop) {
 				showBarStatus(ctx);
-				return;
+				return withDisinfected();
 			}
 
 			// When within safeInputLimit and backgroundCycles is enabled, run the cycle asynchronously
@@ -964,7 +998,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						}
 					}
 				})();
-				return;
+				return withDisinfected();
 			}
 
 			running = true;
@@ -978,14 +1012,14 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 				report(result);
 				showBarStatus(ctx);
 				admit(projected);
-				return;
+				return withDisinfected();
 			}
 			lastAfter = result.after;
 			report(result.report);
 			showBarStatus(ctx);
 			admit(result.after);
 			return {
-				entries: [...event.entries, ...result.batch, { type: "custom", customType: DYNAMIC_STATE_ENTRY, data: result.state } as SessionBoundaryDraft],
+				entries: [...event.entries, ...disinfectDrafts, ...result.batch, { type: "custom", customType: DYNAMIC_STATE_ENTRY, data: result.state } as SessionBoundaryDraft],
 			};
 		};
 
@@ -997,17 +1031,35 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		pi.on("context", (event, ctx) => {
 			const branch = ctx.sessionManager.getBranch();
 			const incomplete = findIncompleteBatches(branch);
-			if (incomplete.length === 0) return;
 			const byId = new Map(branch.map((entry) => [entry.id, entry]));
+			const editedIds = new Set<string>(
+				branch.flatMap((entry) => (entry.type === "context_edit" ? [entry.targetId] : [])),
+			);
 			const replace = new Map<string, unknown>();
 			const omit = new Set<string>();
 			for (const edit of incomplete.flatMap((batch) => batch.remaining)) {
+				editedIds.add(edit.targetId);
 				const entry = byId.get(edit.targetId);
 				if (!entry || entry.type !== "message") continue;
 				const key = messageKey(entry.message);
 				if (edit.replacement === null) omit.add(key);
 				else replace.set(key, edit.replacement.content);
 			}
+			// In-flight disinfection of any unedited raw assistant message that imitated the summary header.
+			for (const entry of branch) {
+				if (entry.type !== "message" || entry.message.role !== "assistant" || editedIds.has(entry.id)) continue;
+				const content = (entry.message as { content?: unknown }).content;
+				if (!Array.isArray(content) || content.some((b: { type?: string }) => b?.type === "toolCall")) continue;
+				const rawText = content
+					.filter((b: { type?: string }) => b?.type === "text")
+					.map((b: { text?: unknown }) => (typeof b.text === "string" ? b.text : ""))
+					.join("\n");
+				const sanitized = sanitizeHallucinatedSummaryText(rawText);
+				if (sanitized !== undefined) {
+					replace.set(messageKey(entry.message), [{ type: "text", text: sanitized }]);
+				}
+			}
+			if (replace.size === 0 && omit.size === 0) return;
 			// Key every message before changing any: a replaced message must not take another's key.
 			const keyed = event.messages.map((message) => ({ message, key: messageKey(message) }));
 			for (const { message, key } of keyed) {
