@@ -598,6 +598,19 @@ describe("codex-settings style TUI settings menu & store", () => {
 		const highTrigger = settingValuesToConfig({ targetPercent: 50, startPercent: 85 });
 		expect(highTrigger.thresholds.startRatio).toBe(0.85);
 		expect(highTrigger.thresholds.ceilingRatio).toBeGreaterThan(0.85);
+		// Even when baseConfig had a legacy ceilingRatio of 0.7 (70%), setting trigger to 70% or 75%
+		// cleans up the legacy ceilingRatio and succeeds without any < urgent (70%) error.
+		const legacyBase = parseLiveCompactConfig({
+			enabled: true,
+			strategy: "dynamic-ai",
+			thresholds: { targetRatio: 0.35, startRatio: 0.6, ceilingRatio: 0.7 },
+		});
+		const legacyValues = configToSettingValues(legacyBase);
+		expect(legacyValues.ceilingPercent).toBeUndefined();
+		expect(() => validateSettingsThresholds({ ...legacyValues, startPercent: 75 }, legacyValues)).not.toThrow();
+		const upgraded = settingValuesToConfig({ ...legacyValues, startPercent: 75 }, legacyBase);
+		expect(upgraded.thresholds.startRatio).toBe(0.75);
+		expect(upgraded.thresholds.ceilingRatio).toBeGreaterThan(0.75);
 		// Equal or inverted thresholds are rejected.
 		expect(() => validateSettingsThresholds({ targetPercent: 70, startPercent: 70 })).toThrow(
 			/Invalid thresholds: target \(70%\) must be < trigger \(70%\)/u,

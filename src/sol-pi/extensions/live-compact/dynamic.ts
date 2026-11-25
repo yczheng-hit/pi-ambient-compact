@@ -1295,31 +1295,31 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			} else if (currentLevels && currentTokens !== undefined) {
 				const urgent = currentTokens >= currentLevels.ceiling;
 				const routesChanged = state?.routes !== undefined && state.routes !== routes;
-				const urgentRetryDue = urgent && state?.at !== undefined && now() - state.at >= URGENT_RETRY_MS;
+				const retryTimerDue = state?.at !== undefined && now() - state.at >= URGENT_RETRY_MS;
 				if (currentTokens < currentLevels.start) {
 					const delta = currentLevels.start - currentTokens;
-					gateLine = `gate: idle · ${delta.toLocaleString("en-US")} tokens (${percent(delta, window)}) below start threshold`;
+					gateLine = `gate: idle · ${delta.toLocaleString("en-US")} tokens (${percent(delta, window)}) below trigger threshold`;
 				} else if (state && !urgent && requests - state.requestCount < cooldownRequests) {
 					const left = cooldownRequests - (requests - state.requestCount);
-					gateLine = `gate: cooldown · ${left}/${cooldownRequests} request(s) remaining (or cross urgent ${percent(currentLevels.ceiling, window)})`;
+					gateLine = `gate: cooldown · ${left}/${cooldownRequests} request(s) remaining`;
 				} else if (
 					state &&
 					state.outcome !== "committed" &&
 					!(state.outcome !== "failed" && hasFreshSegments) &&
 					!routesChanged &&
-					!urgentRetryDue &&
+					!retryTimerDue &&
 					currentTokens < state.projected + retryGrowthRatio * currentLevels.contextWindow
 				) {
 					const needed = Math.ceil(state.projected + retryGrowthRatio * currentLevels.contextWindow - currentTokens);
 					const waitSec =
-						urgent && state.at !== undefined ? Math.max(1, Math.ceil((URGENT_RETRY_MS - (now() - state.at)) / 1_000)) : undefined;
-					gateLine = `gate: backoff · needs +${needed.toLocaleString("en-US")} tokens growth${waitSec !== undefined ? ` or ${waitSec}s until urgent retry` : ""}`;
+						state.at !== undefined ? Math.max(1, Math.ceil((URGENT_RETRY_MS - (now() - state.at)) / 1_000)) : undefined;
+					gateLine = `gate: backoff · needs +${needed.toLocaleString("en-US")} tokens growth${waitSec !== undefined ? ` or ${waitSec}s until retry` : ""}`;
 				} else if (poolCount === 0) {
-					gateLine = "gate: no_candidates · above start threshold, but no eligible segments to summarize";
+					gateLine = "gate: no_candidates · above trigger threshold, but no eligible segments to summarize";
 				} else if (!urgent && poolRealTokens * 0.9 < minSavings) {
 					gateLine = `gate: below_min_savings · pool (~${poolRealTokens.toLocaleString("en-US")} tokens) is below min savings (${minSavings.toLocaleString("en-US")} tokens)`;
 				} else {
-					gateLine = `gate: ready · eligible for maintenance at next boundary${urgent ? " (urgent)" : ""} (or run /ambient-compact now)`;
+					gateLine = "gate: ready · eligible for maintenance at next boundary (or run /ambient-compact now)";
 				}
 			}
 

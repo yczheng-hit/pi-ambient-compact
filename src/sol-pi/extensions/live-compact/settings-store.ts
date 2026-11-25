@@ -97,7 +97,6 @@ export function configToSettingValues(config: LiveCompactConfig): SettingValues 
 		verificationRoute: routeString(config.verification),
 		startPercent: roundPercent(config.thresholds.startRatio),
 		targetPercent: roundPercent(config.thresholds.targetRatio),
-		ceilingPercent: roundPercent(config.thresholds.ceilingRatio),
 		keepRecentToolRounds: config.protection.keepRecentToolRounds,
 		minFullRequests: config.protection.minFullRequests,
 		minSavingsPercent: roundPercent(config.maintenance.minSavingsRatio),
@@ -129,7 +128,6 @@ export function extractExplicitFlatSettings(raw: Document): Document {
 	if (isDocument(lc.thresholds)) {
 		if (typeof lc.thresholds.startRatio === "number") out.startPercent = roundPercent(lc.thresholds.startRatio);
 		if (typeof lc.thresholds.targetRatio === "number") out.targetPercent = roundPercent(lc.thresholds.targetRatio);
-		if (typeof lc.thresholds.ceilingRatio === "number") out.ceilingPercent = roundPercent(lc.thresholds.ceilingRatio);
 	}
 	if (isDocument(lc.protection)) {
 		if (typeof lc.protection.keepRecentToolRounds === "number") {
@@ -258,19 +256,10 @@ export function applyFlatChangesToDocument(raw: Document, changes: SettingChange
 				break;
 		}
 	}
-	if (
-		isDocument(lc.thresholds) &&
-		typeof lc.thresholds.startRatio === "number" &&
-		!Object.hasOwn(changes, "ceilingPercent")
-	) {
-		const start = lc.thresholds.startRatio;
-		const existingCeiling = typeof lc.thresholds.ceilingRatio === "number" ? lc.thresholds.ceilingRatio : 0;
-		if (existingCeiling <= start) {
-			lc.thresholds = {
-				...lc.thresholds,
-				ceilingRatio: Number(Math.min(0.98, Math.max(start + 0.1, 0.85, (start + 1) / 2)).toFixed(6)),
-			};
-		}
+	if (isDocument(lc.thresholds) && !Object.hasOwn(changes, "ceilingPercent")) {
+		// Clean up any legacy `ceilingRatio` (urgent) when saving two-threshold (target + trigger) settings;
+		// `parseLiveCompactConfig` automatically derives the internal emergency ceiling above `startRatio`.
+		setNestedField(lc, "thresholds", "ceilingRatio", undefined);
 	}
 	next.liveCompact = lc;
 	return next;

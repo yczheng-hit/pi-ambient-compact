@@ -364,7 +364,7 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 			return [
 				`Ambient Compact: ${supported === false ? "inactive (needs Pi >= 0.87)" : "enabled (local-tools)"}`,
 				levels
-					? `levels: start ${percent(levels.start, window)}, target ${percent(levels.target, window)}, ceiling ${percent(levels.ceiling, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens${levels.clamped ? (levels.inputLimit === levels.compactionLimit ? " (lowered under Pi's compaction threshold)" : " (lowered under the safe limit)") : ""}`
+					? `levels: target ${percent(levels.target, window)}, trigger ${percent(levels.start, window)}, safe input ${percent(levels.safeInputLimit, window)} of ${window} tokens${levels.clamped ? (levels.inputLimit === levels.compactionLimit ? " (lowered under Pi's compaction threshold)" : " (lowered under the safe limit)") : ""}`
 					: "levels: unknown until the first completed turn with a known model window",
 				`context: ${percent(projected, window)} before, ${percent(lastAfter, window)} after the last boundary` +
 					(decision ? ` (${decision.reason})` : ""),
