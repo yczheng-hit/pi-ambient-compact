@@ -103,23 +103,15 @@ export function buildLiveCompactSettingFields(ctx?: ExtensionContext): SettingsF
 		{
 			id: "targetPercent",
 			label: "Target level",
-			description: "Target context usage percentage after maintenance (must be < start and urgent).",
+			description: "Target context usage percentage after maintenance (must be < trigger).",
 			choices: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95],
 			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
 			format: (value) => `${value}%`,
 		},
 		{
 			id: "startPercent",
-			label: "Start threshold",
-			description: "Context usage percentage where maintenance becomes eligible (must be > target and < urgent).",
-			choices: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95],
-			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
-			format: (value) => `${value}%`,
-		},
-		{
-			id: "ceilingPercent",
-			label: "Urgent ceiling",
-			description: "Context usage percentage where cooldown and min-savings checks are bypassed (must be > target and start).",
+			label: "Trigger threshold",
+			description: "Context usage percentage where background maintenance triggers to compact back to target (must be > target).",
 			choices: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95],
 			number: { min: 0, max: 100, exclusiveMin: true, exclusiveMax: true, unit: "%" },
 			format: (value) => `${value}%`,
@@ -214,22 +206,24 @@ export interface OpenLiveCompactSettingsOptions {
 }
 
 /**
- * Enforce strict `target < start < urgent` (`0 < targetPercent < startPercent < ceilingPercent < 100`)
- * in the settings pane so urgent is always strictly greater than the other two and target is always
- * strictly smaller than the other two.
+ * Enforce strict `target < trigger` (`0 < targetPercent < startPercent < 100`, and `< ceilingPercent`
+ * when explicitly passed) in the settings pane.
  */
 export function validateSettingsThresholds(values: SettingValues, fallback?: SettingValues): void {
 	const target = Number(values.targetPercent ?? fallback?.targetPercent);
 	const start = Number(values.startPercent ?? fallback?.startPercent);
-	const ceiling = Number(values.ceilingPercent ?? fallback?.ceilingPercent);
+	const explicitCeiling =
+		values.ceilingPercent !== undefined ? Number(values.ceilingPercent) : undefined;
 	if (
 		!Number.isFinite(target) ||
 		!Number.isFinite(start) ||
-		!Number.isFinite(ceiling) ||
-		!(target > 0 && target < start && start < ceiling && ceiling < 100)
+		!(target > 0 && target < start && start < 100) ||
+		(explicitCeiling !== undefined && (!Number.isFinite(explicitCeiling) || !(start < explicitCeiling && explicitCeiling < 100)))
 	) {
 		throw new Error(
-			`Invalid thresholds: target (${target}%) must be < start (${start}%) < urgent (${ceiling}%)`,
+			explicitCeiling !== undefined
+				? `Invalid thresholds: target (${target}%) must be < trigger (${start}%) < urgent (${explicitCeiling}%)`
+				: `Invalid thresholds: target (${target}%) must be < trigger (${start}%)`,
 		);
 	}
 }
@@ -280,7 +274,6 @@ export async function openLiveCompactSettingsPane(
 					const strategy = values.strategy ?? currentValues.strategy;
 					const start = Number(values.startPercent ?? currentValues.startPercent);
 					const target = Number(values.targetPercent ?? currentValues.targetPercent);
-					const ceiling = Number(values.ceilingPercent ?? currentValues.ceilingPercent);
 					try {
 						validateSettingsThresholds(values, currentValues);
 					} catch (error) {
@@ -289,8 +282,8 @@ export async function openLiveCompactSettingsPane(
 					const summary = values.summaryRoute ?? "Working model";
 					const verify = values.verificationRoute ?? "Working model";
 					return strategy === "dynamic-ai"
-						? `dynamic-ai · target ${target}% · start ${start}% · urgent ${ceiling}% · summary: ${summary} · verify: ${verify}`
-						: `local-tools · target ${target}% · start ${start}% · urgent ${ceiling}% · keep ${values.keepRecentToolRounds ?? 3} rounds`;
+						? `dynamic-ai · target ${target}% · trigger ${start}% · summary: ${summary} · verify: ${verify}`
+						: `local-tools · target ${target}% · trigger ${start}% · keep ${values.keepRecentToolRounds ?? 3} rounds`;
 				},
 				extraDetails: options.extraDetails ? () => options.extraDetails!(ctx) : undefined,
 				runNow: options.runNow ? (signal) => options.runNow!(ctx, signal) : undefined,

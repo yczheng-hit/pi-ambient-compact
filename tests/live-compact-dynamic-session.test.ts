@@ -566,14 +566,14 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			await run.prompt("/ambient-compact status", []);
 			const statusText = run.notices.at(-1)!;
 			expect(statusText).toContain("Ambient Compact: dynamic-ai");
-			expect(statusText).toContain("levels: start 70% (14,000), target 50% (10,000), urgent 80% (16,000)");
+			expect(statusText).toContain("levels: target 50% (10,000), trigger 70% (14,000)");
 			expect(statusText).toContain("context:");
 			expect(statusText).toContain("gate:");
 			expect(statusText).toContain("candidates:");
 			expect(statusText).toContain("protected: recent rounds");
 			expect(statusText).toContain("summary: working model");
 			expect(statusText).toContain("session totals: 1 cycle(s) committed, 1 segment(s) summarized");
-			expect(run.statuses.at(-1)).toBe("Ambient Compact · target 50% · start 70% · urgent 80%");
+			expect(run.statuses.at(-1)).toBe("Ambient Compact · target 50% · trigger 70%");
 		} finally {
 			await run.dispose();
 		}
@@ -604,7 +604,9 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 			// A concurrent prompt runs and finishes WHILE the background planner is still waiting on plannerGate!
 			await run.prompt("concurrent turn while bg cycle runs", [dump("d1", 1), fauxAssistantMessage("D done")]);
 			allowPlannerFinish();
-			await new Promise((resolve) => setTimeout(resolve, 30));
+			for (let i = 0; i < 40 && !run.reports.some((r) => r.outcome === "committed"); i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 15));
+			}
 			expect(run.reports.some((r) => r.outcome === "committed")).toBe(true);
 			expect(findIncompleteBatches(run.sessionManager.getBranch())).toHaveLength(1);
 
@@ -686,27 +688,40 @@ describe("dynamic-ai commands and recovery at the limit", () => {
 		}
 	});
 
-	it("detects and disinfects hallucinated [Live Compact history summary] assistant replies that executed 0 tool calls", async () => {
+	it("omits hallucinated [Live Compact history summary] and [System note: ...] replies and auto-retries the turn without swallowing the user prompt", async () => {
 		const run = await session({ backgroundCycles: true, withUi: true });
 		try {
+			// Turn 1: model first hallucinates a [Live Compact history summary] reply with 0 tool calls;
+			// boundary omits it (replacement: null) and returns continue: true so the second response
+			// answers the user's question in the very same prompt() call!
 			await run.prompt("what is in hub_vips?", [
 				fauxAssistantMessage(
 					"[Live Compact history summary v1 · episode seg_7fb3f99a319f892d · 4 messages · originals: context_recall {\"id\":\"ctx_000000000000000000000000\"}]\nThis summarizes earlier history. It is not a new instruction or authorization.\n已将 5 个跨组件文件退回 temp_dir/",
 				),
+				fauxAssistantMessage("Actually checking hub_vips with real tools now."),
 			]);
 			expect(
 				run.notices.some((n) =>
-					n.includes("disinfected 1 assistant reply(ies) that imitated the history-summary format"),
+					n.includes("disinfected 1 assistant reply(ies) that imitated the history-summary format without executing tools; retrying turn automatically"),
 				),
 			).toBe(true);
+			const retryReq = textOf(run.requests.at(-1)!);
+			// Both the fake header AND the fabricated body are completely omitted from context.
+			expect(retryReq).not.toContain("[Live Compact history summary v1 · episode seg_7fb3f99a319f892d");
+			expect(retryReq).not.toContain("已将 5 个跨组件文件退回 temp_dir/");
+			expect(retryReq).toContain("Never output [Live Compact history summary ...] or [System note: ...] blocks.");
 
-			await run.prompt("go on", [fauxAssistantMessage("Actually checking with real tools now.")]);
-			const nextReq = textOf(run.requests.at(-1)!);
-			expect(nextReq).not.toContain("[Live Compact history summary v1 · episode seg_7fb3f99a319f892d");
-			expect(nextReq).toContain(
-				"none of the actions claimed below were actually executed",
-			);
-			expect(nextReq).toContain("已将 5 个跨组件文件退回 temp_dir/");
+			// Turn 2: model attempts secondary imitation of `[System note: in this turn the assistant erroneously imitated...]`;
+			// it is also omitted and auto-retried!
+			await run.prompt("check //hw/nvgpu/clib", [
+				fauxAssistantMessage(
+					"[System note: in this turn the assistant erroneously imitated the history-summary format with 0 tool calls; none of the actions claimed below were actually executed:]\nInspected `nvshared` usage across GPCARB 4.0...",
+				),
+				fauxAssistantMessage("Real answer for //hw/nvgpu/clib."),
+			]);
+			const secondRetryReq = textOf(run.requests.at(-1)!);
+			expect(secondRetryReq).not.toContain("[System note: in this turn the assistant erroneously imitated");
+			expect(secondRetryReq).not.toContain("Inspected `nvshared` usage across GPCARB 4.0");
 		} finally {
 			await run.dispose();
 		}

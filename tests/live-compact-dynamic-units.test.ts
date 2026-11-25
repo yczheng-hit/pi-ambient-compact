@@ -67,6 +67,11 @@ describe("segment index", () => {
 			const edited = applyEdits(entries, segment, summaryCarrierText(segment, "summary"));
 			expect(validateToolPairing(edited), segment.kind).toEqual([]);
 			expect(JSON.stringify(edited)).toContain("Live Compact history summary v1");
+			for (const msg of edited) {
+				if (msg.role === "assistant") {
+					expect(JSON.stringify(msg)).not.toContain("Live Compact history summary v1");
+				}
+			}
 		}
 	});
 
@@ -541,7 +546,9 @@ describe("codex-settings style TUI settings menu & store", () => {
 
 			// Press Ctrl+S to persist the session override to disk; Session B hot-reloads it on its next resolve.
 			comp.handleInput!("\x13");
-			await new Promise((resolve) => setTimeout(resolve, 30));
+			for (let i = 0; i < 40 && !comp.render(100).join("\n").includes("Saved and applied."); i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 15));
+			}
 			rendered = comp.render(100).join("\n");
 			expect(rendered).toContain("Saved and applied.");
 			const savedJson = JSON.parse(readFileSync(globalPath, "utf8"));
@@ -559,7 +566,9 @@ describe("codex-settings style TUI settings menu & store", () => {
 			comp.handleInput!("\u001b[B");
 			comp.handleInput!("\u001b[B");
 			comp.handleInput!("\r");
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			for (let i = 0; i < 40 && !comp.render(100).join("\n").includes("maintenance committed: 80% → 48%"); i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 15));
+			}
 			expect(ranNow).toBe(1);
 			expect(comp.render(100).join("\n")).toContain("maintenance committed: 80% → 48%");
 
@@ -574,25 +583,27 @@ describe("codex-settings style TUI settings menu & store", () => {
 		}
 	});
 
-	it("provides 5% step presets for target/start/urgent and enforces strict target < start < urgent in the settings pane", () => {
+	it("provides 5% step presets for target and trigger thresholds and enforces strict target < trigger in the settings pane", () => {
 		const fields = buildLiveCompactSettingFields();
 		const expectedSteps = Array.from({ length: 19 }, (_, index) => (index + 1) * 5);
-		for (const id of ["targetPercent", "startPercent", "ceilingPercent"]) {
+		for (const id of ["targetPercent", "startPercent"]) {
 			const field = fields.find((candidate) => candidate.id === id);
 			expect(field?.choices).toEqual(expectedSteps);
 		}
-		// Default configuration satisfies strict target < start < urgent out of the box.
+		expect(fields.some((candidate) => candidate.id === "ceilingPercent")).toBe(false);
+		// Default configuration satisfies strict target < trigger out of the box.
 		expect(() => validateSettingsThresholds(configToSettingValues(parseLiveCompactConfig({ enabled: true })))).not.toThrow();
-		expect(() => validateSettingsThresholds({ targetPercent: 50, startPercent: 70, ceilingPercent: 80 })).not.toThrow();
+		expect(() => validateSettingsThresholds({ targetPercent: 50, startPercent: 70 })).not.toThrow();
+		// High trigger values (e.g. 85%) automatically derive a valid internal ceiling above trigger.
+		const highTrigger = settingValuesToConfig({ targetPercent: 50, startPercent: 85 });
+		expect(highTrigger.thresholds.startRatio).toBe(0.85);
+		expect(highTrigger.thresholds.ceilingRatio).toBeGreaterThan(0.85);
 		// Equal or inverted thresholds are rejected.
-		expect(() => validateSettingsThresholds({ targetPercent: 70, startPercent: 70, ceilingPercent: 80 })).toThrow(
-			/Invalid thresholds: target \(70%\) must be < start \(70%\) < urgent \(80%\)/u,
+		expect(() => validateSettingsThresholds({ targetPercent: 70, startPercent: 70 })).toThrow(
+			/Invalid thresholds: target \(70%\) must be < trigger \(70%\)/u,
 		);
-		expect(() => validateSettingsThresholds({ targetPercent: 75, startPercent: 70, ceilingPercent: 80 })).toThrow(
-			/Invalid thresholds: target \(75%\) must be < start \(70%\) < urgent \(80%\)/u,
-		);
-		expect(() => validateSettingsThresholds({ targetPercent: 50, startPercent: 80, ceilingPercent: 80 })).toThrow(
-			/Invalid thresholds: target \(50%\) must be < start \(80%\) < urgent \(80%\)/u,
+		expect(() => validateSettingsThresholds({ targetPercent: 75, startPercent: 70 })).toThrow(
+			/Invalid thresholds: target \(75%\) must be < trigger \(70%\)/u,
 		);
 	});
 

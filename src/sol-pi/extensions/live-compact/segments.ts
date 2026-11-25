@@ -213,20 +213,13 @@ export function indexSegments(entries: readonly ProjectedSessionEntry[], options
 
 	grouped.forEach((group, groupIndex) => {
 		const isLatest = groupIndex === grouped.length - 1;
-		// In multi-turn sessions (5+ episodes), keep the final natural-language assistant reply
-		// (`group.final`) of the last 3 completed episodes verbatim and compact only their tool
-		// rounds (`kind: "rounds"`, where the summary sits in `role: "toolResult"`), so the model
-		// always sees genuine natural-language Assistant responses before the active turn and never
-		// falls into few-shot imitation of `Assistant: [Live Compact history summary ...]`.
-		const keepFinalReplyVerbatim =
-			grouped.length >= 5 && groupIndex >= grouped.length - 4 && Boolean(group.final) && group.rounds.length > 0;
 		const allSafe =
 			!group.malformed &&
-			!keepFinalReplyVerbatim &&
+			group.rounds.length > 0 &&
 			group.rounds.every((round) => !round.unsafe && !isProtected.has(round)) &&
 			!group.final?.edited;
-		// A whole earlier episode with a real user turn before it.
-		if (!isLatest && group.episode.start >= 0 && allSafe && group.episode.body.length > 0 && group.rounds.length + (group.final ? 1 : 0) > 0) {
+		// A whole earlier episode with a real user turn before it and at least one tool round.
+		if (!isLatest && group.episode.start >= 0 && allSafe && group.episode.body.length > 0) {
 			push("episode", group.episode.body, group.episode.start);
 			return;
 		}
@@ -259,14 +252,27 @@ export function indexSegments(entries: readonly ProjectedSessionEntry[], options
 }
 
 export const SUMMARY_HEADER_PREFIX = "[Live Compact history summary v";
+export const LEGACY_DISINFECT_PREFIX =
+	"[System note: in this turn the assistant erroneously imitated the history-summary format";
 
 /**
- * Detect whether a raw (unedited) assistant message erroneously imitated the summary header
- * with 0 tool calls, and return a disinfected replacement text. Real summaries are only ever
- * written in `context_edit` replacements, never as the raw text of an assistant `message` entry.
+ * True when an assistant message's text starts with either the `[Live Compact history summary v...]`
+ * header or the legacy `[System note: in this turn the assistant erroneously imitated...]` header.
+ * Such hallucinated replies are omitted (`replacement: null`) rather than kept in `role: "assistant"`,
+ * preventing secondary imitation and removing fabricated conclusions from context.
  */
-export function sanitizeHallucinatedSummaryText(rawText: string): string | undefined {
+export function isHallucinatedSummaryText(rawText: string): boolean {
 	const trimmed = rawText.trimStart();
+	return trimmed.startsWith(SUMMARY_HEADER_PREFIX) || trimmed.startsWith(LEGACY_DISINFECT_PREFIX);
+}
+
+/**
+ * Strip the machine summary header from a legacy `context_edit` that placed a summary inside
+ * `role: "assistant"`, returning the plain summary body so old sessions do not induce few-shot
+ * imitation.
+ */
+export function stripSummaryHeader(text: string): string | undefined {
+	const trimmed = text.trimStart();
 	if (!trimmed.startsWith(SUMMARY_HEADER_PREFIX)) return undefined;
 	const lines = trimmed.split("\n");
 	let bodyStart = 1;
@@ -276,12 +282,11 @@ export function sanitizeHallucinatedSummaryText(rawText: string): string | undef
 	) {
 		bodyStart = 2;
 	}
-	const body = lines.slice(bodyStart).join("\n").trim();
-	return [
-		"[System note: in this turn the assistant erroneously imitated the history-summary format with 0 tool calls; none of the actions claimed below were actually executed:]",
-		body || "(empty)",
-	].join("\n");
+	return lines.slice(bodyStart).join("\n").trim();
 }
+
+/** Kept as an alias for tests/callers inspecting the stripped body. */
+export const sanitizeHallucinatedSummaryText = stripSummaryHeader;
 
 /** The text a summary carrier holds: a fixed header, then the summary. */
 export function summaryCarrierText(segment: Segment, summary: string, archiveId?: string): string {
@@ -293,27 +298,63 @@ export function summaryCarrierText(segment: Segment, summary: string, archiveId?
 	].join("\n");
 }
 
+function finalReplyText(message: AgentMessage): string | undefined {
+	const content = contentOf(message);
+	if (!Array.isArray(content)) return undefined;
+	const texts = content
+		.filter((block: { type?: string }) => block?.type === "text")
+		.map((block: { text?: unknown }) => (typeof block.text === "string" ? block.text : ""));
+	return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
 /**
  * The edits that replace `segment` with `carrierText`, in segment order. Callers order
  * them with `orderPrefixSafe` before committing.
+ *
+ * Whenever `segment` starts with a tool round (`firstCall` + `firstResult`), the summary is
+ * placed inside `firstResult` (`role: "toolResult"`), NEVER inside `role: "assistant"`, so the
+ * working model never sees `User -> Assistant: [Live Compact history summary ...]` examples and
+ * cannot be few-shot induced into generating summary blocks as its own Assistant reply.
  */
 export function segmentEdits(segment: Segment, carrierText: string): PlannedEdit[] {
 	const text = { content: [{ type: "text" as const, text: carrierText }] };
 	const [first, ...rest] = segment.messages;
 	if (!first) return [];
+	const [firstCall] = toolCalls(first.message) as Array<Record<string, unknown> & { id: string }>;
+	const firstResult = rest.find((item) => (item.message as { toolCallId?: string }).toolCallId === firstCall?.id);
+	if (firstCall && firstResult) {
+		const stubCall = { ...firstCall, arguments: compactCallArguments(firstCall) };
+		const last = rest.at(-1);
+		const keepTrailingAssistant =
+			segment.kind === "episode" &&
+			last !== undefined &&
+			last !== firstResult &&
+			last.message.role === "assistant" &&
+			toolCalls(last.message).length === 0;
+		const edits: PlannedEdit[] = [
+			{ targetId: first.entryId, replacement: { content: [stubCall as never] } },
+			{ targetId: firstResult.entryId, replacement: text },
+		];
+		for (const item of rest) {
+			if (item === firstResult) continue;
+			if (keepTrailingAssistant && item === last) {
+				const rawFinal = finalReplyText(item.message);
+				if (rawFinal && rawFinal.length > 600) {
+					edits.push({
+						targetId: item.entryId,
+						replacement: { content: [{ type: "text", text: `${rawFinal.slice(0, 400).trimEnd()}…` }] },
+					});
+				}
+				continue;
+			}
+			edits.push({ targetId: item.entryId, replacement: null });
+		}
+		return edits;
+	}
 	if (segment.kind === "episode") {
 		return [{ targetId: first.entryId, replacement: text }, ...rest.map((item) => ({ targetId: item.entryId, replacement: null }))];
 	}
-	// rounds: keep the first call (arguments compacted with schema-valid keys) and let its result carry the summary.
-	const [firstCall] = toolCalls(first.message) as Array<Record<string, unknown> & { id: string }>;
-	const firstResult = rest.find((item) => (item.message as { toolCallId?: string }).toolCallId === firstCall?.id);
-	if (!firstCall || !firstResult) return [];
-	const stubCall = { ...firstCall, arguments: compactCallArguments(firstCall) };
-	return [
-		{ targetId: first.entryId, replacement: { content: [stubCall as never] } },
-		{ targetId: firstResult.entryId, replacement: text },
-		...rest.filter((item) => item !== firstResult).map((item) => ({ targetId: item.entryId, replacement: null })),
-	];
+	return [];
 }
 
 function compactCallArguments(call: Record<string, unknown>): Record<string, unknown> {

@@ -166,6 +166,16 @@ export function parseLiveCompactConfig(value) {
 					: start / 2;
 		config.thresholds = { ...config.thresholds, targetRatio: fallbackTarget };
 	}
+	// When ceilingRatio is omitted and startRatio (trigger) is >= the default 0.8 ceiling, derive the
+	// internal emergency ceiling above startRatio so two-threshold configs (target + trigger) always work.
+	if (
+		!(isRecord(value.thresholds) && Object.hasOwn(value.thresholds, "ceilingRatio")) &&
+		config.thresholds.startRatio >= config.thresholds.ceilingRatio
+	) {
+		const start = config.thresholds.startRatio;
+		const derivedCeiling = Number(Math.min(0.99, Math.max(start + 0.1, (start + 1) / 2)).toFixed(6));
+		config.thresholds = { ...config.thresholds, ceilingRatio: derivedCeiling };
+	}
 	const { startRatio, targetRatio, ceilingRatio } = config.thresholds;
 	if (!(targetRatio > 0 && targetRatio <= startRatio && startRatio < ceilingRatio)) {
 		throw new Error("liveCompact.thresholds must satisfy 0 < targetRatio <= startRatio < ceilingRatio < 1 " +

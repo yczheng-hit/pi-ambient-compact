@@ -75,7 +75,7 @@ import { type Planner, type PlanUsage, renderSegment, userTurns } from "./planne
 import { describeRoute, parseRouteArgument, ROUTE_KINDS, ROUTES_ENTRY, type RouteKind, RouteStore, writeGlobalRoute } from "./routes.ts";
 import { buildLiveCompactSettingFields, canOpenSettingsTui, openLiveCompactSettingsPane } from "./settings-pane.ts";
 import { LiveCompactConfigResolver } from "./settings-store.ts";
-import { indexSegments, sanitizeHallucinatedSummaryText, type Segment, segmentEdits, summaryCarrierText } from "./segments.ts";
+import { indexSegments, isHallucinatedSummaryText, LEGACY_DISINFECT_PREFIX, stripSummaryHeader, type Segment, segmentEdits, summaryCarrierText } from "./segments.ts";
 import { validateToolPairing } from "./validator.ts";
 
 export const DYNAMIC_STATE_ENTRY = "sol-pi-live-compact-dynamic-v1";
@@ -335,6 +335,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 		let inToolLoop = false;
 		let stagedBgResult: { readonly result: CycleResult; readonly projectedAtStart: number } | undefined;
 		const skippedCounts = new Map<string, number>();
+		const retriedUserEntryIds = new Set<string>();
+		let pendingRetryReminder = false;
 		const routeStore = new RouteStore(config);
 		const configResolver = new LiveCompactConfigResolver(config);
 		const ledgers = new Map<string, Ledger>();
@@ -369,6 +371,8 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			calibration = undefined;
 			lastAfter = undefined;
 			skippedCounts.clear();
+			retriedUserEntryIds.clear();
+			pendingRetryReminder = false;
 			noGain = undefined;
 		};
 		const resetAndShow = (_event: unknown, ctx: ExtensionContext): void => {
@@ -483,7 +487,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const pending = findIncompleteBatches(ctx.sessionManager.getBranch()).length > 0;
 			ctx.ui.setStatus(
 				DYNAMIC_STATUS_KEY,
-				`Ambient Compact · target ${percent(currentLevels.target, window)} · start ${percent(currentLevels.start, window)} · urgent ${percent(currentLevels.ceiling, window)}${pending ? " · batch pending" : ""}`,
+				`Ambient Compact · target ${percent(currentLevels.target, window)} · trigger ${percent(currentLevels.start, window)}${pending ? " · batch pending" : ""}`,
 			);
 		}
 
@@ -552,7 +556,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			if (!force) {
 				if (state && !urgent && requests - state.requestCount < cooldownRequests) return skipped("cooldown");
 				const routesChanged = state?.routes !== undefined && state.routes !== routes;
-				const urgentRetryDue = urgent && state?.at !== undefined && now() - state.at >= URGENT_RETRY_MS;
+				const urgentRetryDue = state?.at !== undefined && now() - state.at >= URGENT_RETRY_MS;
 				const canSlideWindow = state?.outcome !== "failed" && hasFreshSegments;
 				if (
 					state &&
@@ -812,40 +816,76 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 					ctx.abort();
 				}
 			};
-			// Detect and permanently disinfect any raw (unedited) assistant message on the branch that
-			// erroneously imitated the `[Live Compact history summary v1 ...]` format with 0 tool calls.
-			const editedTargetIds = new Set<string>(
-				branch.flatMap((entry) => (entry.type === "context_edit" ? [entry.targetId] : [])),
-			);
+			// Detect and permanently omit (`replacement: null`) any assistant message on the branch that
+			// erroneously imitated `[Live Compact history summary v...]` or `[System note: ...]` with 0
+			// tool calls. When the just-finished assistant turn was hallucinated, also set `continue: true`
+			// (at most once per user turn) so Pi immediately re-runs the turn to answer the user's request.
+			const latestEditByTarget = new Map<string, SessionEntry & { type: "context_edit" }>();
+			for (const entry of branch) {
+				if (entry.type === "context_edit") latestEditByTarget.set(entry.targetId, entry);
+			}
+			const hallucinatedIds = new Set<string>();
 			const disinfectDrafts: SessionBoundaryDraft[] = [];
 			for (const entry of branch) {
-				if (entry.type !== "message" || entry.message.role !== "assistant" || editedTargetIds.has(entry.id)) continue;
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				const existingEdit = latestEditByTarget.get(entry.id);
+				if (existingEdit?.replacement === null) continue; // already omitted
 				const content = (entry.message as { content?: unknown }).content;
 				if (!Array.isArray(content) || content.some((b: { type?: string }) => b?.type === "toolCall")) continue;
-				const rawText = content
-					.filter((b: { type?: string }) => b?.type === "text")
-					.map((b: { text?: unknown }) => (typeof b.text === "string" ? b.text : ""))
-					.join("\n");
-				const sanitized = sanitizeHallucinatedSummaryText(rawText);
-				if (sanitized !== undefined) {
+				const extractText = (blocks: unknown): string =>
+					Array.isArray(blocks)
+						? blocks
+								.filter((b: { type?: string }) => b?.type === "text")
+								.map((b: { text?: unknown }) => (typeof b.text === "string" ? b.text : ""))
+								.join("\n")
+						: "";
+				const isPoisoned =
+					existingEdit === undefined
+						? isHallucinatedSummaryText(extractText(content))
+						: extractText((existingEdit.replacement as { content?: unknown }).content)
+								.trimStart()
+								.startsWith(LEGACY_DISINFECT_PREFIX);
+				if (isPoisoned) {
+					hallucinatedIds.add(entry.id);
 					disinfectDrafts.push({
 						type: "context_edit",
 						targetId: entry.id,
-						replacement: { content: [{ type: "text", text: sanitized }] },
+						replacement: null,
 					});
 				}
+			}
+			const lastMsgEntry = branch.findLast((entry) => entry.type === "message");
+			const lastUserEntry = branch.findLast((entry) => entry.type === "message" && entry.message.role === "user");
+			const currentTurnHallucinated = Boolean(lastMsgEntry && hallucinatedIds.has(lastMsgEntry.id));
+			const shouldAutoRetry = Boolean(
+				currentTurnHallucinated &&
+					lastUserEntry &&
+					!retriedUserEntryIds.has(lastUserEntry.id),
+			);
+			if (shouldAutoRetry && lastUserEntry) {
+				retriedUserEntryIds.add(lastUserEntry.id);
+				pendingRetryReminder = true;
 			}
 			if (disinfectDrafts.length > 0) {
 				notify(
 					ctx,
-					`Ambient Compact: disinfected ${disinfectDrafts.length} assistant reply(ies) that imitated the history-summary format without executing tools.`,
+					`Ambient Compact: disinfected ${disinfectDrafts.length} assistant reply(ies) that imitated the history-summary format without executing tools${shouldAutoRetry ? "; retrying turn automatically" : ""}.`,
 					"warning",
 				);
 			}
-			const withDisinfected = (extra: readonly SessionBoundaryDraft[] = []): { entries: SessionBoundaryDraft[] } | undefined => {
+			const withDisinfected = (
+				extra: readonly SessionBoundaryDraft[] = [],
+			): { entries: SessionBoundaryDraft[]; continue?: boolean } | undefined => {
 				const combined = [...event.entries, ...disinfectDrafts, ...extra];
-				return combined.length > event.entries.length ? { entries: combined } : undefined;
+				if (combined.length > event.entries.length || shouldAutoRetry) {
+					return { entries: combined, ...(shouldAutoRetry ? { continue: true } : {}) };
+				}
+				return undefined;
 			};
+			if (shouldAutoRetry) {
+				showBarStatus(ctx);
+				return withDisinfected();
+			}
 
 			// Finish an interrupted or out-of-boundary batch before anything else.
 			const hasToolResults = trigger === "turn_end" && Array.isArray(event.toolResults) && event.toolResults.length > 0;
@@ -1032,42 +1072,75 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			const branch = ctx.sessionManager.getBranch();
 			const incomplete = findIncompleteBatches(branch);
 			const byId = new Map(branch.map((entry) => [entry.id, entry]));
-			const editedIds = new Set<string>(
-				branch.flatMap((entry) => (entry.type === "context_edit" ? [entry.targetId] : [])),
-			);
+			const latestEditByTarget = new Map<string, SessionEntry & { type: "context_edit" }>();
+			for (const entry of branch) {
+				if (entry.type === "context_edit") latestEditByTarget.set(entry.targetId, entry);
+			}
 			const replace = new Map<string, unknown>();
 			const omit = new Set<string>();
 			for (const edit of incomplete.flatMap((batch) => batch.remaining)) {
-				editedIds.add(edit.targetId);
 				const entry = byId.get(edit.targetId);
 				if (!entry || entry.type !== "message") continue;
 				const key = messageKey(entry.message);
 				if (edit.replacement === null) omit.add(key);
 				else replace.set(key, edit.replacement.content);
 			}
-			// In-flight disinfection of any unedited raw assistant message that imitated the summary header.
+			// In-flight omission of any hallucinated assistant reply (`[Live Compact history summary ...]`
+			// or `[System note: ...]`), and header stripping for any legacy edited `role: "assistant"`
+			// episode summary so existing sessions cannot trigger few-shot imitation.
 			for (const entry of branch) {
-				if (entry.type !== "message" || entry.message.role !== "assistant" || editedIds.has(entry.id)) continue;
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				const existingEdit = latestEditByTarget.get(entry.id);
+				if (existingEdit?.replacement === null) continue;
 				const content = (entry.message as { content?: unknown }).content;
 				if (!Array.isArray(content) || content.some((b: { type?: string }) => b?.type === "toolCall")) continue;
-				const rawText = content
-					.filter((b: { type?: string }) => b?.type === "text")
-					.map((b: { text?: unknown }) => (typeof b.text === "string" ? b.text : ""))
-					.join("\n");
-				const sanitized = sanitizeHallucinatedSummaryText(rawText);
-				if (sanitized !== undefined) {
-					replace.set(messageKey(entry.message), [{ type: "text", text: sanitized }]);
+				const extractText = (blocks: unknown): string =>
+					Array.isArray(blocks)
+						? blocks
+								.filter((b: { type?: string }) => b?.type === "text")
+								.map((b: { text?: unknown }) => (typeof b.text === "string" ? b.text : ""))
+								.join("\n")
+						: "";
+				if (existingEdit === undefined && !replace.has(messageKey(entry.message))) {
+					if (isHallucinatedSummaryText(extractText(content))) {
+						omit.add(messageKey(entry.message));
+					}
+				} else if (existingEdit?.replacement) {
+					const editedText = extractText((existingEdit.replacement as { content?: unknown }).content);
+					if (editedText.trimStart().startsWith(LEGACY_DISINFECT_PREFIX)) {
+						omit.add(messageKey(entry.message));
+					} else {
+						const stripped = stripSummaryHeader(editedText);
+						if (stripped !== undefined) {
+							replace.set(messageKey(entry.message), [{ type: "text", text: stripped }]);
+						}
+					}
 				}
 			}
-			if (replace.size === 0 && omit.size === 0) return;
+			const injectReminder = pendingRetryReminder;
+			pendingRetryReminder = false;
+			if (replace.size === 0 && omit.size === 0 && !injectReminder) return;
 			// Key every message before changing any: a replaced message must not take another's key.
 			const keyed = event.messages.map((message) => ({ message, key: messageKey(message) }));
 			for (const { message, key } of keyed) {
 				const content = replace.get(key);
 				if (content !== undefined) (message as { content: unknown }).content = content;
 			}
-			if (omit.size === 0) return;
-			return { messages: keyed.filter(({ key }) => !omit.has(key)).map(({ message }) => message) };
+			const filtered = omit.size === 0 ? keyed.map(({ message }) => message) : keyed.filter(({ key }) => !omit.has(key)).map(({ message }) => message);
+			if (injectReminder) {
+				const lastUser = filtered.findLast((message) => message.role === "user");
+				const userContent = lastUser ? (lastUser as { content?: unknown }).content : undefined;
+				if (lastUser && Array.isArray(userContent)) {
+					(lastUser as { content: unknown }).content = [
+						...userContent,
+						{
+							type: "text",
+							text: "\n[Respond directly to the user's request in natural language and invoke real tools when needed. Never output [Live Compact history summary ...] or [System note: ...] blocks.]",
+						},
+					];
+				}
+			}
+			return { messages: filtered };
 		});
 
 		// An input that cannot fit first gets an immediate cycle; if it still cannot fit, it is not sent.
@@ -1266,7 +1339,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			return [
 				"Ambient Compact: dynamic-ai",
 				currentLevels
-					? `levels: start ${percent(currentLevels.start, window)} (${currentLevels.start.toLocaleString("en-US")}), target ${percent(currentLevels.target, window)} (${currentLevels.target.toLocaleString("en-US")}), urgent ${percent(currentLevels.ceiling, window)} (${currentLevels.ceiling.toLocaleString("en-US")}), safe input ${percent(currentLevels.safeInputLimit, window)} (${currentLevels.safeInputLimit.toLocaleString("en-US")}) of ${window?.toLocaleString("en-US")} tokens`
+					? `levels: target ${percent(currentLevels.target, window)} (${currentLevels.target.toLocaleString("en-US")}), trigger ${percent(currentLevels.start, window)} (${currentLevels.start.toLocaleString("en-US")}), safe input ${percent(currentLevels.safeInputLimit, window)} (${currentLevels.safeInputLimit.toLocaleString("en-US")}) of ${window?.toLocaleString("en-US")} tokens`
 					: "levels: unknown until the first completed turn with a known model window",
 				`context: ${currentTokens !== undefined && window ? `${currentTokens.toLocaleString("en-US")} / ${window.toLocaleString("en-US")} tokens (${percent(currentTokens, window)})` : `${percent(currentTokens, window)} after the last boundary`} · calibration ${ratio.toFixed(2)}x`,
 				formatCacheMetricsLine(computeCacheMetrics(branch)),

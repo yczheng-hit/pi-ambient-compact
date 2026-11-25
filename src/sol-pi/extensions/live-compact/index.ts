@@ -200,7 +200,7 @@ export function createLiveCompactExtension(options: LiveCompactExtensionOptions)
 				LIVE_COMPACT_STATUS_KEY,
 				supported === false
 					? "Ambient Compact inactive (needs Pi >= 0.87)"
-					: `Ambient Compact · target ${percent(levels?.target, window)} · start ${percent(levels?.start, window)} · urgent ${percent(levels?.ceiling, window)}`,
+					: `Ambient Compact · target ${percent(levels?.target, window)} · trigger ${percent(levels?.start, window)}`,
 			);
 		};
 		const resetMeasurements = (): void => {

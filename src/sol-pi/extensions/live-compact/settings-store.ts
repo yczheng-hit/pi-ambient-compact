@@ -258,6 +258,20 @@ export function applyFlatChangesToDocument(raw: Document, changes: SettingChange
 				break;
 		}
 	}
+	if (
+		isDocument(lc.thresholds) &&
+		typeof lc.thresholds.startRatio === "number" &&
+		!Object.hasOwn(changes, "ceilingPercent")
+	) {
+		const start = lc.thresholds.startRatio;
+		const existingCeiling = typeof lc.thresholds.ceilingRatio === "number" ? lc.thresholds.ceilingRatio : 0;
+		if (existingCeiling <= start) {
+			lc.thresholds = {
+				...lc.thresholds,
+				ceilingRatio: Number(Math.min(0.98, Math.max(start + 0.1, 0.85, (start + 1) / 2)).toFixed(6)),
+			};
+		}
+	}
 	next.liveCompact = lc;
 	return next;
 }
