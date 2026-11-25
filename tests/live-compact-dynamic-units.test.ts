@@ -750,4 +750,44 @@ describe("codex-settings style TUI settings menu & store", () => {
 		expect(line).toContain("post-compact 1st-req 87.5% (1)");
 		expect(line).toContain("last edit at ~50% of history");
 	});
+
+	it("caps candidate pool at MAX_POOL_SEGMENTS (10) and backfills previouslySkipped when a lone fresh segment is below goal * 0.5", async () => {
+		const { MAX_POOL_SEGMENTS, selectCandidatePool } = await import(
+			"../src/sol-pi/extensions/live-compact/dynamic.ts"
+		);
+		const seg = (id: string, tokens: number): Segment => ({
+			id,
+			kind: "rounds",
+			messages: [],
+			tokens,
+			episodeStart: 0,
+		});
+		// 1. 20 segments of 10k tokens each: capped at MAX_POOL_SEGMENTS (10), never 20+.
+		const many = Array.from({ length: 20 }, (_, i) => seg(`seg_${i}`, 10_000));
+		const capped = selectCandidatePool(many, { goal: 300_000, ratio: 1 });
+		expect(capped.pool).toHaveLength(MAX_POOL_SEGMENTS);
+
+		// 2. Avoids `pool: 1` deadlock: 4 older segments were skipped once, and 1 new small fresh segment (25k) arrives.
+		//    Even though 25k >= minTokens (20k), it is < goal * 0.5 (100k), so previouslySkipped is backfilled!
+		const mixed = [
+			seg("old_1", 30_000),
+			seg("old_2", 30_000),
+			seg("old_3", 30_000),
+			seg("fresh_1", 25_000),
+		];
+		const skipped = new Map<string, number>([
+			["old_1", 1],
+			["old_2", 1],
+			["old_3", 1],
+		]);
+		const backfilled = selectCandidatePool(mixed, {
+			goal: 200_000,
+			ratio: 1,
+			minTokens: 20_000,
+			skippedCounts: skipped,
+		});
+		expect(backfilled.pool.length).toBeGreaterThan(1);
+		expect(backfilled.pool.map((s) => s.id)).toContain("fresh_1");
+		expect(backfilled.pool.map((s) => s.id)).toContain("old_1");
+	});
 });

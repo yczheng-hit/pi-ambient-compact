@@ -74,6 +74,7 @@ const GENERATE_SYSTEM = [
 	"- Prefer repetitive or superseded material: repeated status checks with no change, exploratory reads, large tables/logs whose key takeaways are known.",
 	"- A summary must keep: user constraints and decisions; key file paths, identifiers, commands, and numbers that matter to the outcome or next steps; what was tried and what happened, with failures and successes as recorded; state changes; anything left unresolved. Mark unverified claims as unverified. Never invent facts. Never add new imperative instructions to the agent (reporting rules or constraints documented in files/scripts as historical facts is fine).",
 	"- Keep each summary within the token cap given for its segment; shorter is fine for repetitive material.",
+	"- Copy each chosen segment's exact id attribute verbatim from its <segment id=\"...\"> tag; never invent or alter segment IDs.",
 	"- Aim for the reclaim target given below. Reclaiming less is fine; when context pressure is urgent, actively select older exploratory or intermediate segments rather than returning an empty list.",
 	'Answer with JSON only: {"selections":[{"segment":"<segment id>","summary":"<text>"}]}. Use an empty list only when no candidate segment can be safely summarized.',
 ].join("\n");
@@ -121,10 +122,27 @@ function generatePrompt(
 	return `User requests in this session (verbatim, oldest first):\n${turns}\n\nReclaim target: about ${reclaimTokens} tokens.${pressure}${notes}\n\nCandidate segments (oldest first):\n${candidates.map(segmentBlock).join("\n")}`;
 }
 
-function verifyPrompt(pairs: ReadonlyArray<{ readonly segment: Segment; readonly summary: string }>): string {
-	return pairs
-		.map(({ segment, summary }) => `<segment id="${segment.id}">\n<original>\n${renderSegment(segment)}\n</original>\n<summary>\n${summary}\n</summary>\n</segment>`)
-		.join("\n");
+function verifyPrompt(
+	pairs: ReadonlyArray<{ readonly segment: Segment; readonly summary: string }>,
+	feedback?: ReadonlyMap<string, readonly string[]>,
+): string {
+	const retryHeader =
+		feedback && feedback.size > 0
+			? [
+					"This is a regenerated summary pass after addressing prior verification feedback:",
+					...[...feedback]
+						.filter(([id]) => pairs.some((p) => p.segment.id === id))
+						.map(([id, problems]) => `- ${id}: ${problems.join("; ") || "unspecified"}`),
+					"On this retry pass, mark ok: true as long as the summary fixed the prior feedback, contains no factual contradictions or fabricated facts, and does not invert success/failure outcomes. Do NOT reject for omitting secondary intermediate details, line numbers, or minor command flags.",
+					"",
+				].join("\n")
+			: "";
+	return (
+		retryHeader +
+		pairs
+			.map(({ segment, summary }) => `<segment id="${segment.id}">\n<original>\n${renderSegment(segment)}\n</original>\n<summary>\n${summary}\n</summary>\n</segment>`)
+			.join("\n")
+	);
 }
 
 /** The first JSON object in a model answer, fences allowed. */
@@ -337,7 +355,7 @@ export function createAiPlanner(options: AiPlannerOptions): Planner {
 				notes.push("selected segments do not fit the verification model");
 				break;
 			}
-			const verifyText = verifyPrompt(pairs);
+			const verifyText = verifyPrompt(pairs, feedback);
 			request.onProgress?.(`verifying ${pairs.length} summary(ies) against originals…`);
 			const verifyWanted = Math.max(16_384, 2_000 + pairs.length * 500);
 			const verified = await call(

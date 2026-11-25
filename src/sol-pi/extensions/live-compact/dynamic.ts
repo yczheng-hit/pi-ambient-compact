@@ -83,7 +83,9 @@ export const DYNAMIC_STATUS_KEY = "sol-pi-live-compact";
 /** Largest candidate pool handed to one planning call, in real (calibrated) tokens. */
 export const MAX_POOL_TOKENS = 150_000;
 /** Upper cap when scaling the candidate pool to match a large reclaim goal (`start - target`) in one cycle. */
-export const MAX_DYNAMIC_POOL_TOKENS = 450_000;
+export const MAX_DYNAMIC_POOL_TOKENS = 350_000;
+/** Maximum number of segments handed to one planning call to prevent hex-ID confusion and output truncation. */
+export const MAX_POOL_SEGMENTS = 10;
 /** Above the urgent level, a failed cycle is retried after this long without waiting for growth. */
 export const URGENT_RETRY_MS = 120_000;
 
@@ -220,6 +222,7 @@ export interface CandidatePoolOptions {
 	readonly goal: number;
 	readonly ratio: number;
 	readonly maxPoolTokens?: number;
+	readonly maxSegments?: number;
 	readonly minTokens?: number;
 	readonly skippedCounts?: ReadonlyMap<string, number>;
 	/** Highest message index already edited by an earlier batch (`-1` when none). */
@@ -252,6 +255,7 @@ export function selectCandidatePool(
 	const maxPoolTokens =
 		options.maxPoolTokens ??
 		Math.min(MAX_DYNAMIC_POOL_TOKENS, Math.max(MAX_POOL_TOKENS, Math.ceil(options.goal * 2)));
+	const maxSegments = options.maxSegments ?? MAX_POOL_SEGMENTS;
 	const minTokens = options.minTokens ?? 1;
 	const lastEditedIndex = options.lastEditedIndex ?? -1;
 	const { goal, ratio, skippedCounts, preferTail, force } = options;
@@ -288,6 +292,7 @@ export function selectCandidatePool(
 		const picked: Segment[] = [];
 		for (const segment of list) {
 			if (selectedIds.has(segment.id)) continue;
+			if (selectedIds.size >= maxSegments) break;
 			if (selectedIds.size > 0 && poolTokens * ratio >= goal * 1.5) break;
 			if ((poolTokens + segment.tokens) * ratio > maxPoolTokens) continue;
 			selectedIds.add(segment.id);
@@ -311,7 +316,8 @@ export function selectCandidatePool(
 			tryAdd(behindFrontierFresh, false);
 		}
 	}
-	if (ordered.length === 0 || poolTokens * ratio < minTokens) {
+	const backfillFloor = Math.max(minTokens, Math.floor(goal * 0.5));
+	if (ordered.length === 0 || poolTokens * ratio < backfillFloor) {
 		tryAdd(previouslySkipped, false);
 	}
 	return { pool: ordered, poolTokens };
@@ -609,6 +615,7 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 			let selected = 0;
 			let batch: SessionBoundaryDraft[] = [];
 			const committedSegmentIds = new Set<string>();
+			const verifiedSegmentIds = new Set<string>();
 			const batchId = `lc_${requests}_${hash(`${now()}:${pool.map((segment) => segment.id).join(",")}`).slice(0, 8)}`;
 			const effective = routesFor(ctx);
 			try {
@@ -666,7 +673,15 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 						const saved = estimateMessagesTokens(index.messages.map((item) => item.message)) - estimateMessagesTokens(editedMessages);
 						after = projected - Math.floor(saved * ratio);
 						selected = archived.length;
-						if (projected - after < effectiveMinSavings || after >= projected) {
+						for (const item of archived) verifiedSegmentIds.add(item.segmentId);
+						// Once the planner has run and >= 1 segments passed verification, commit them whenever they
+						// yield a meaningful net reduction (>= 1.5% window capped at 15k tokens, or effectiveMinSavings
+						// when smaller) instead of discarding verified work that fell slightly short of the 10% pre-flight target.
+						const postVerifyMinSavings =
+							force || overSafeLimit
+								? 1
+								: Math.min(effectiveMinSavings, Math.max(1, Math.min(15_000, Math.ceil(window * 0.015))));
+						if (projected - after < postVerifyMinSavings || after >= projected) {
 							outcome = "insufficient";
 							after = projected;
 						} else {
@@ -687,7 +702,9 @@ export function createDynamicCompactExtension(options: DynamicCompactOptions): E
 
 			const uncommittedSegmentIds =
 				outcome !== "aborted" && outcome !== "failed"
-					? pool.filter((segment) => !committedSegmentIds.has(segment.id)).map((segment) => segment.id)
+					? pool
+							.filter((segment) => !committedSegmentIds.has(segment.id) && !verifiedSegmentIds.has(segment.id))
+							.map((segment) => segment.id)
 					: [];
 			for (const id of uncommittedSegmentIds) {
 				skippedCounts.set(id, (skipMap.get(id) ?? 0) + 1);
